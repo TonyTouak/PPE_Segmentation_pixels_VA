@@ -1,284 +1,305 @@
 """
-Utilitaires pour visualiser les résultats
+Utilitaires de visualisation pour la segmentation sémantique
 """
 
+import os
 import numpy as np
-import cv2
 import matplotlib.pyplot as plt
-from pathlib import Path
 import torch
-from typing import List, Tuple
+from PIL import Image
+import cv2
+import sys
+
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from config import BINARY_COLORS, BINARY_CLASSES
 
 
-def visualize_prediction(image: np.ndarray, ground_truth: np.ndarray, 
-                        prediction: np.ndarray, class_colors: dict,
-                        class_names: List[str] = None,
-                        save_path: str = None):
+def visualize_predictions(images, masks, predictions, num_samples=4, save_path=None):
     """
-    Visualiser une prédiction avec matplotlib
+    Visualise les images, masques ground truth et prédictions côte à côte
     
     Args:
-        image: Image originale (H, W, 3)
-        ground_truth: Ground truth (H, W)
-        prediction: Prédiction (H, W)
-        class_colors: Dictionnaire {class_id: (R, G, B)}
-        class_names: Noms des classes
-        save_path: Chemin de sauvegarde (optionnel)
+        images: Tensor d'images (B, C, H, W) normalisées
+        masks: Tensor de masques ground truth (B, H, W)
+        predictions: Tensor de prédictions (B, H, W) ou (B, C, H, W)
+        num_samples: Nombre d'échantillons à visualiser
+        save_path: Chemin pour sauvegarder la figure (optionnel)
     """
-    # Convertir les masques en couleur
-    gt_color = mask_to_color(ground_truth, class_colors)
-    pred_color = mask_to_color(prediction, class_colors)
+    # Dénormaliser les images
+    mean = torch.tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1)
+    std = torch.tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1)
     
-    # Créer la figure
-    fig, axes = plt.subplots(2, 2, figsize=(15, 12))
+    if torch.is_tensor(images):
+        images = images.cpu()
+        images = images * std + mean
+        images = torch.clamp(images, 0, 1)
+        images = images.permute(0, 2, 3, 1).numpy()
     
-    # Image originale
-    axes[0, 0].imshow(image)
-    axes[0, 0].set_title('Image Originale', fontsize=14)
-    axes[0, 0].axis('off')
+    if torch.is_tensor(masks):
+        masks = masks.cpu().numpy()
     
-    # Ground truth
-    axes[0, 1].imshow(gt_color)
-    axes[0, 1].set_title('Ground Truth', fontsize=14)
-    axes[0, 1].axis('off')
+    if torch.is_tensor(predictions):
+        if predictions.ndim == 4:  # (B, C, H, W)
+            predictions = torch.argmax(predictions, dim=1)
+        predictions = predictions.cpu().numpy()
     
-    # Prédiction
-    axes[1, 0].imshow(pred_color)
-    axes[1, 0].set_title('Prédiction', fontsize=14)
-    axes[1, 0].axis('off')
+    num_samples = min(num_samples, len(images))
     
-    # Overlay
-    overlay = cv2.addWeighted(image, 0.6, pred_color, 0.4, 0)
-    axes[1, 1].imshow(overlay)
-    axes[1, 1].set_title('Overlay', fontsize=14)
-    axes[1, 1].axis('off')
+    fig, axes = plt.subplots(num_samples, 3, figsize=(15, 5 * num_samples))
     
-    # Ajouter la légende
-    if class_names:
-        legend_elements = []
-        for class_id, color in class_colors.items():
-            if class_id < len(class_names):
-                from matplotlib.patches import Patch
-                legend_elements.append(
-                    Patch(facecolor=np.array(color)/255.0, 
-                          label=class_names[class_id])
-                )
+    if num_samples == 1:
+        axes = axes.reshape(1, -1)
+    
+    for i in range(num_samples):
+        # Image originale
+        axes[i, 0].imshow(images[i])
+        axes[i, 0].set_title('Image Originale')
+        axes[i, 0].axis('off')
         
-        fig.legend(handles=legend_elements, loc='center right', 
-                  fontsize=10, framealpha=0.9)
+        # Ground truth
+        gt_colored = colorize_mask(masks[i])
+        axes[i, 1].imshow(gt_colored)
+        axes[i, 1].set_title('Ground Truth')
+        axes[i, 1].axis('off')
+        
+        # Prédiction
+        pred_colored = colorize_mask(predictions[i])
+        axes[i, 2].imshow(pred_colored)
+        axes[i, 2].set_title('Prédiction')
+        axes[i, 2].axis('off')
     
     plt.tight_layout()
     
     if save_path:
         plt.savefig(save_path, dpi=150, bbox_inches='tight')
-        print(f"Visualisation sauvegardée: {save_path}")
+        print(f"Figure sauvegardée: {save_path}")
+    else:
+        plt.show()
     
-    plt.show()
+    plt.close()
 
 
-def mask_to_color(mask: np.ndarray, class_colors: dict) -> np.ndarray:
+def colorize_mask(mask, class_colors=None):
     """
-    Convertir un masque de classes en image RGB colorée
+    Convertit un masque de classes en image RGB colorée
     
     Args:
         mask: Masque (H, W) avec indices de classes
-        class_colors: Dictionnaire {class_id: (R, G, B)}
-        
+        class_colors: Dictionnaire {classe: (R, G, B)} (optionnel)
+    
     Returns:
-        Image RGB colorée (H, W, 3)
+        colored_mask: Image RGB (H, W, 3)
     """
+    if class_colors is None:
+        class_colors = BINARY_COLORS
+    
     h, w = mask.shape
-    color_mask = np.zeros((h, w, 3), dtype=np.uint8)
+    colored_mask = np.zeros((h, w, 3), dtype=np.uint8)
     
-    for class_id, color in class_colors.items():
-        color_mask[mask == class_id] = color
+    for class_idx, color in class_colors.items():
+        colored_mask[mask == class_idx] = color
     
-    return color_mask
+    return colored_mask
 
 
-def plot_training_history(train_losses: List[float], val_mious: List[float],
-                         save_path: str = None):
+def overlay_prediction_on_image(image, prediction, alpha=0.5):
     """
-    Tracer l'historique d'entraînement
+    Superpose la prédiction sur l'image originale
     
     Args:
-        train_losses: Liste des pertes d'entraînement
-        val_mious: Liste des mIoU de validation
-        save_path: Chemin de sauvegarde (optionnel)
+        image: Image RGB (H, W, 3)
+        prediction: Masque de prédiction (H, W)
+        alpha: Transparence de l'overlay (0-1)
+    
+    Returns:
+        overlayed: Image avec overlay
     """
-    fig, axes = plt.subplots(1, 2, figsize=(15, 5))
+    if isinstance(image, torch.Tensor):
+        image = image.cpu().numpy()
     
-    # Loss
-    axes[0].plot(train_losses, label='Train Loss', linewidth=2)
-    axes[0].set_xlabel('Epoch', fontsize=12)
-    axes[0].set_ylabel('Loss', fontsize=12)
-    axes[0].set_title('Training Loss', fontsize=14)
-    axes[0].legend(fontsize=10)
-    axes[0].grid(True, alpha=0.3)
+    if isinstance(prediction, torch.Tensor):
+        prediction = prediction.cpu().numpy()
     
-    # mIoU
-    axes[1].plot(val_mious, label='Validation mIoU', color='orange', linewidth=2)
-    axes[1].set_xlabel('Epoch', fontsize=12)
-    axes[1].set_ylabel('mIoU', fontsize=12)
-    axes[1].set_title('Validation mIoU', fontsize=14)
-    axes[1].legend(fontsize=10)
-    axes[1].grid(True, alpha=0.3)
+    # Assurer que l'image est en uint8
+    if image.dtype == np.float32 or image.dtype == np.float64:
+        image = (image * 255).astype(np.uint8)
     
-    plt.tight_layout()
+    # Coloriser la prédiction
+    pred_colored = colorize_mask(prediction)
     
-    if save_path:
-        plt.savefig(save_path, dpi=150, bbox_inches='tight')
-        print(f"Historique sauvegardé: {save_path}")
+    # Superposer
+    overlayed = cv2.addWeighted(image, 1 - alpha, pred_colored, alpha, 0)
     
-    plt.show()
+    return overlayed
 
 
-def visualize_class_distribution(dataset_dir: str, num_classes: int,
-                                 class_names: List[str] = None,
-                                 save_path: str = None):
+def visualize_batch_predictions(model, dataloader, device, num_batches=1, save_dir=None):
     """
-    Visualiser la distribution des classes dans un dataset
+    Visualise les prédictions pour plusieurs batches
     
     Args:
-        dataset_dir: Dossier contenant les masques
+        model: Modèle entraîné
+        dataloader: DataLoader
+        device: Device (cuda/cpu)
+        num_batches: Nombre de batches à visualiser
+        save_dir: Dossier pour sauvegarder les figures
+    """
+    model.eval()
+    
+    if save_dir:
+        os.makedirs(save_dir, exist_ok=True)
+    
+    with torch.no_grad():
+        for batch_idx, (images, masks) in enumerate(dataloader):
+            if batch_idx >= num_batches:
+                break
+            
+            images = images.to(device)
+            outputs = model(images)
+            predictions = torch.argmax(outputs, dim=1)
+            
+            save_path = None
+            if save_dir:
+                save_path = os.path.join(save_dir, f'batch_{batch_idx}.png')
+            
+            visualize_predictions(
+                images.cpu(), 
+                masks.cpu(), 
+                predictions.cpu(),
+                num_samples=min(4, len(images)),
+                save_path=save_path
+            )
+
+
+def create_comparison_video(images, masks, predictions, output_path, fps=10):
+    """
+    Crée une vidéo de comparaison entre ground truth et prédictions
+    
+    Args:
+        images: List ou array d'images
+        masks: List ou array de masques
+        predictions: List ou array de prédictions
+        output_path: Chemin de sortie pour la vidéo
+        fps: Frames per second
+    """
+    if len(images) == 0:
+        print("Pas d'images à traiter")
+        return
+    
+    # Préparer le writer vidéo
+    h, w = images[0].shape[:2]
+    fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+    writer = cv2.VideoWriter(output_path, fourcc, fps, (w * 3, h))
+    
+    for img, mask, pred in zip(images, masks, predictions):
+        # Coloriser
+        mask_colored = colorize_mask(mask)
+        pred_colored = colorize_mask(pred)
+        
+        # Convertir BGR pour OpenCV
+        img_bgr = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
+        mask_bgr = cv2.cvtColor(mask_colored, cv2.COLOR_RGB2BGR)
+        pred_bgr = cv2.cvtColor(pred_colored, cv2.COLOR_RGB2BGR)
+        
+        # Concaténer horizontalement
+        frame = np.hstack([img_bgr, mask_bgr, pred_bgr])
+        
+        writer.write(frame)
+    
+    writer.release()
+    print(f"Vidéo créée: {output_path}")
+
+
+def plot_training_curves(log_file, save_path=None):
+    """
+    Trace les courbes d'entraînement depuis un fichier de log
+    
+    Args:
+        log_file: Fichier contenant les métriques d'entraînement
+        save_path: Chemin pour sauvegarder la figure
+    """
+    # Cette fonction nécessite un fichier de log structuré
+    # Implémentation à adapter selon le format de vos logs
+    pass
+
+
+def visualize_class_distribution(masks_dir, num_classes=2, sample_size=100):
+    """
+    Visualise la distribution des classes dans le dataset
+    
+    Args:
+        masks_dir: Dossier contenant les masques
         num_classes: Nombre de classes
-        class_names: Noms des classes
-        save_path: Chemin de sauvegarde (optionnel)
+        sample_size: Nombre de masques à échantillonner
     """
-    from PIL import Image
-    
-    masks_dir = Path(dataset_dir)
-    mask_files = list(masks_dir.glob('*_mask.png'))
-    
-    print(f"Analyse de {len(mask_files)} masques...")
+    mask_files = [f for f in os.listdir(masks_dir) 
+                  if f.endswith(('.png', '.npy'))][:sample_size]
     
     class_counts = np.zeros(num_classes)
     
     for mask_file in mask_files:
-        mask = np.array(Image.open(mask_file))
-        for class_id in range(num_classes):
-            class_counts[class_id] += np.sum(mask == class_id)
-    
-    # Calculer les pourcentages
-    total_pixels = class_counts.sum()
-    class_percentages = 100.0 * class_counts / total_pixels
-    
-    # Tracer
-    plt.figure(figsize=(12, 6))
-    
-    x_labels = class_names if class_names else [f"Class {i}" for i in range(num_classes)]
-    x_pos = np.arange(num_classes)
-    
-    bars = plt.bar(x_pos, class_percentages, color='steelblue', alpha=0.7)
-    
-    # Colorer les barres en fonction du pourcentage
-    for i, bar in enumerate(bars):
-        if class_percentages[i] < 1:
-            bar.set_color('red')
-        elif class_percentages[i] < 5:
-            bar.set_color('orange')
-    
-    plt.xlabel('Classes', fontsize=12)
-    plt.ylabel('Pourcentage (%)', fontsize=12)
-    plt.title('Distribution des Classes dans le Dataset', fontsize=14)
-    plt.xticks(x_pos, x_labels, rotation=45, ha='right')
-    plt.grid(True, alpha=0.3, axis='y')
-    
-    # Ajouter les valeurs sur les barres
-    for i, (count, pct) in enumerate(zip(class_counts, class_percentages)):
-        plt.text(i, pct + 0.5, f'{pct:.1f}%\n({int(count):,})', 
-                ha='center', va='bottom', fontsize=8)
-    
-    plt.tight_layout()
-    
-    if save_path:
-        plt.savefig(save_path, dpi=150, bbox_inches='tight')
-        print(f"Distribution sauvegardée: {save_path}")
-    
-    plt.show()
-    
-    # Afficher les statistiques
-    print("\n" + "="*60)
-    print("DISTRIBUTION DES CLASSES")
-    print("="*60)
-    for i, name in enumerate(x_labels):
-        print(f"{name:20s}: {class_counts[i]:12,.0f} pixels ({class_percentages[i]:5.2f}%)")
-    print("="*60)
-    print(f"{'Total':20s}: {total_pixels:12,.0f} pixels")
-    print("="*60 + "\n")
-
-
-def compare_models(checkpoint_paths: List[str], metric_name: str = 'mIoU',
-                  model_names: List[str] = None, save_path: str = None):
-    """
-    Comparer plusieurs modèles entraînés
-    
-    Args:
-        checkpoint_paths: Liste des chemins vers les checkpoints
-        metric_name: Nom de la métrique à comparer
-        model_names: Noms des modèles
-        save_path: Chemin de sauvegarde (optionnel)
-    """
-    if model_names is None:
-        model_names = [f"Model {i+1}" for i in range(len(checkpoint_paths))]
-    
-    metrics = []
-    
-    for checkpoint_path in checkpoint_paths:
-        checkpoint = torch.load(checkpoint_path, map_location='cpu')
-        if 'metrics' in checkpoint:
-            metric_value = checkpoint['metrics'].get(metric_name, 0)
+        mask_path = os.path.join(masks_dir, mask_file)
+        
+        if mask_file.endswith('.npy'):
+            mask = np.load(mask_path)
         else:
-            metric_value = checkpoint.get('best_miou', 0)
-        metrics.append(metric_value)
+            mask = np.array(Image.open(mask_path))
+        
+        if len(mask.shape) == 3:
+            mask = mask[:, :, 0]
+        
+        for class_idx in range(num_classes):
+            class_counts[class_idx] += np.sum(mask == class_idx)
+    
+    # Normaliser
+    class_counts = class_counts / class_counts.sum() * 100
     
     # Tracer
     plt.figure(figsize=(10, 6))
+    class_names = [BINARY_CLASSES[i] for i in range(num_classes)]
+    colors = [np.array(BINARY_COLORS[i]) / 255.0 for i in range(num_classes)]
     
-    x_pos = np.arange(len(model_names))
-    bars = plt.bar(x_pos, metrics, color='steelblue', alpha=0.7)
+    plt.bar(class_names, class_counts, color=colors)
+    plt.ylabel('Pourcentage (%)')
+    plt.title('Distribution des classes dans le dataset')
+    plt.ylim([0, 100])
     
-    # Colorer la meilleure barre
-    best_idx = np.argmax(metrics)
-    bars[best_idx].set_color('green')
-    
-    plt.xlabel('Modèles', fontsize=12)
-    plt.ylabel(metric_name, fontsize=12)
-    plt.title(f'Comparaison des Modèles - {metric_name}', fontsize=14)
-    plt.xticks(x_pos, model_names, rotation=45, ha='right')
-    plt.grid(True, alpha=0.3, axis='y')
-    
-    # Ajouter les valeurs
-    for i, metric in enumerate(metrics):
-        plt.text(i, metric + 0.01, f'{metric:.4f}', 
-                ha='center', va='bottom', fontsize=10)
+    for i, v in enumerate(class_counts):
+        plt.text(i, v + 2, f'{v:.1f}%', ha='center', fontweight='bold')
     
     plt.tight_layout()
-    
-    if save_path:
-        plt.savefig(save_path, dpi=150, bbox_inches='tight')
-        print(f"Comparaison sauvegardée: {save_path}")
-    
     plt.show()
+
+
+def save_prediction_as_image(prediction, output_path, colorize=True):
+    """
+    Sauvegarde une prédiction comme image
+    
+    Args:
+        prediction: Masque de prédiction (H, W)
+        output_path: Chemin de sortie
+        colorize: Si True, colorise le masque, sinon sauvegarde les indices
+    """
+    if isinstance(prediction, torch.Tensor):
+        prediction = prediction.cpu().numpy()
+    
+    if colorize:
+        colored = colorize_mask(prediction)
+        Image.fromarray(colored).save(output_path)
+    else:
+        Image.fromarray(prediction.astype(np.uint8)).save(output_path)
+    
+    print(f"Prédiction sauvegardée: {output_path}")
 
 
 if __name__ == "__main__":
     # Test de visualisation
-    print("Test des fonctions de visualisation...")
+    print("Test des fonctions de visualisation")
     
     # Créer des données de test
-    image = np.random.randint(0, 255, (512, 512, 3), dtype=np.uint8)
-    gt = np.random.randint(0, 5, (512, 512), dtype=np.uint8)
-    pred = np.random.randint(0, 5, (512, 512), dtype=np.uint8)
+    images = torch.rand(2, 3, 256, 256)
+    masks = torch.randint(0, 2, (2, 256, 256))
+    predictions = torch.randint(0, 2, (2, 256, 256))
     
-    class_colors = {
-        0: (0, 0, 0),
-        1: (128, 64, 128),
-        2: (244, 35, 232),
-        3: (70, 70, 70),
-        4: (107, 142, 35)
-    }
-    
-    class_names = ['Background', 'Road', 'Sidewalk', 'Building', 'Vegetation']
-    
-    visualize_prediction(image, gt, pred, class_colors, class_names)
+    # Visualiser
+    visualize_predictions(images, masks, predictions, num_samples=2)

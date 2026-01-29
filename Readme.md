@@ -1,24 +1,50 @@
-# Segmentation Sémantique pour Conduite Autonome avec CARLA
+# Segmentation Sémantique Binaire pour Conduite Autonome
 
-Projet de segmentation sémantique automatique pour véhicules autonomes utilisant CARLA, PyTorch et les architectures ENet/U-Net.
+Projet de segmentation sémantique **binaire** (Traversable vs. Obstrué) pour véhicules autonomes utilisant CARLA, PyTorch et l'architecture ENet.
+
+## 🎯 Objectif
+
+Le modèle apprend à **reconnaître et comprendre** tous les objets de la scène (voitures, piétons, routes, bâtiments, etc.) pour ensuite les classifier en **2 catégories** :
+- 🟢 **Zone Traversable** (route, trottoir, terrain, etc.)
+- 🔴 **Zone Obstruée** (voitures, piétons, bâtiments, etc.)
+
+### Architecture du système
+
+```
+CARLA (23 classes sémantiques) 
+    ↓
+Collecte des données avec annotations multi-classes
+    ↓
+Entraînement du modèle (apprend les 23 classes)
+    ↓
+Conversion automatique vers 2 classes binaires
+    ↓
+Sortie finale : Traversable (vert) / Obstrué (rouge)
+```
 
 ## 📋 Table des matières
 
 - [Installation](#installation)
+- [Collecte de données](#1-collecte-de-données-depuis-carla)
+- [Préparation des données](#2-préparation-des-données)
+- [Entraînement](#3-entraînement)
+- [Évaluation](#4-évaluation)
+- [Test temps réel](#5-test-en-temps-réel-dans-carla)
 - [Structure du projet](#structure-du-projet)
-- [Workflow complet](#workflow-complet)
-- [Utilisation](#utilisation)
-- [Résultats attendus](#résultats-attendus)
+- [Adaptation aux conditions extrêmes](#adaptation-aux-conditions-extrêmes)
 
 ## 🚀 Installation
 
-### 1. Prérequis
+### Prérequis
 
 - Python 3.8+
-- CUDA 11.8+ (pour GPU)
+- CUDA 11.8+ (pour GPU, fortement recommandé)
 - CARLA Simulator 0.9.13+
+- 16GB RAM minimum
+- GPU avec 6GB+ VRAM recommandé
 
-### 2. Installation des dépendances
+### Installation des dépendances
+
 ```bash
 # Cloner le projet
 git clone <votre-repo>
@@ -33,214 +59,417 @@ venv\Scripts\activate  # Windows
 # Installer les dépendances
 pip install -r requirements.txt
 
-# Installer CARLA
-# Télécharger depuis https://github.com/carla-simulator/carla/releases
-# Puis installer le package Python:
+# Installer CARLA Python API
 pip install carla==0.9.13
 ```
 
-### 3. Configuration CARLA
+### Configuration CARLA
+
 ```bash
-# Lancer le serveur CARLA
+# Télécharger CARLA depuis https://github.com/carla-simulator/carla/releases
+# Extraire et lancer le serveur:
+
 cd /chemin/vers/CARLA
 ./CarlaUE4.sh  # Linux
 # ou
 CarlaUE4.exe  # Windows
 ```
 
-## 📁 Structure du projet
-```
-projet_segmentation/
-├── annotation_tool/          # Outil d'annotation manuelle
-│   ├── annotator.py
-│   └── label_config.json
-├── models/                   # Architectures des modèles
-│   ├── enet.py
-│   └── unet.py
-├── data/                     # Gestion des données
-│   ├── dataset.py
-│   └── augmentation.py
-├── training/                 # Scripts d'entraînement
-│   ├── train.py
-│   ├── evaluate.py
-│   └── config.py
-├── utils/                    # Utilitaires
-│   ├── metrics.py
-│   └── visualization.py
-├── carla_scripts/           # Scripts CARLA
-│   ├── collect_images.py
-│   └── test_realtime.py
-├── checkpoints/             # Modèles sauvegardés
-├── data/                    # Données
-│   ├── train/
-│   │   ├── images/
-│   │   └── masks/
-│   └── val/
-│       ├── images/
-│       └── masks/
-└── requirements.txt
-```
+## 📊 Workflow Complet
 
-## 🔄 Workflow complet
+### 1. Collecte de données depuis CARLA
 
-### Étape 1: Collecte d'images depuis CARLA
+Le script collecte automatiquement des images RGB avec leurs masques sémantiques (23 classes).
+
 ```bash
-# Lancer CARLA d'abord
+# Lancer CARLA d'abord !
+
+# Collecte simple (500 images)
 python carla_scripts/collect_images.py \
-    --output data/collected_images \
+    --output data/collected \
+    --num_images 500
+
+# Collecte diversifiée (différentes météos)
+python carla_scripts/collect_images.py \
+    --output data/collected \
     --num_images 500 \
-    --interval 10
+    --diverse
+
+# Options avancées
+python carla_scripts/collect_images.py \
+    --output data/collected \
+    --num_images 1000 \
+    --diverse \
+    --width 800 \
+    --height 600 \
+    --host localhost \
+    --port 2000
 ```
 
-### Étape 2: Annotation manuelle des images
-```bash
-python annotation_tool/annotator.py \
-    --images data/collected_images \
-    --output data/annotations \
-    --config annotation_tool/label_config.json
-```
+**Sortie** :
+- `data/collected/images/` : Images RGB
+- `data/collected/masks/` : Masques sémantiques (.npy et .png)
 
-**Contrôles de l'outil d'annotation:**
-- Souris gauche: Dessiner
-- Souris droite: Effacer
-- 1-9: Sélectionner la classe
-- n/p: Image suivante/précédente
-- s: Sauvegarder
-- z: Undo
-- q: Quitter
+### 2. Préparation des données
 
-### Étape 3: Organiser les données
+Organisez vos données en train/val/test (80/10/10 typiquement) :
+
 ```bash
-# Créer la structure train/val
+# Créer la structure
 mkdir -p data/train/images data/train/masks
 mkdir -p data/val/images data/val/masks
+mkdir -p data/test/images data/test/masks
 
-# Déplacer les images et masques annotés
-# 80% pour train, 20% pour validation
+# Déplacer les fichiers manuellement ou avec un script
+# Exemple : 80% train, 10% val, 10% test
 ```
 
-### Étape 4: Entraînement du modèle
+**Important** : La conversion multi-classe → binaire se fait **automatiquement** pendant l'entraînement !
+
+### 3. Entraînement
+
+#### 3.1 Entraînement rapide (test)
+
 ```bash
-# Entraînement rapide (test)
 python training/train.py \
-    --config quick \
-    --model unet \
-    --experiment_name test_run
-
-# Entraînement complet
-python training/train.py \
-    --config full \
-    --model unet \
-    --train_images data/train/images \
-    --train_masks data/train/masks \
-    --val_images data/val/images \
-    --val_masks data/val/masks \
-    --batch_size 8 \
-    --epochs 100 \
-    --experiment_name unet_full
-
-# Avec ENet
-python training/train.py \
-    --config full \
     --model enet \
     --train_images data/train/images \
     --train_masks data/train/masks \
     --val_images data/val/images \
     --val_masks data/val/masks \
-    --experiment_name enet_full
+    --epochs 10 \
+    --batch_size 4 \
+    --experiment_name test_run
 ```
 
-### Étape 5: Évaluation
-```bash
-# Évaluer sur le set de test
-python training/evaluate.py \
-    --checkpoint checkpoints/best_model.pth \
-    --images data/test/images \
-    --masks data/test/masks \
-    --output evaluation_results
+#### 3.2 Entraînement complet
 
-# Prédiction sur une seule image
-python training/evaluate.py \
-    --checkpoint checkpoints/best_model.pth \
-    --images data/test/images \
-    --masks data/test/masks \
-    --single_image data/test/images/test_001.png
+```bash
+# Avec ENet (recommandé pour temps réel)
+python training/train.py \
+    --model enet \
+    --train_images data/train/images \
+    --train_masks data/train/masks \
+    --val_images data/val/images \
+    --val_masks data/val/masks \
+    --epochs 100 \
+    --batch_size 8 \
+    --lr 5e-4 \
+    --image_size 512 \
+    --weighted_loss \
+    --experiment_name enet_binary_v1
+
+# Avec U-Net (meilleure précision)
+python training/train.py \
+    --model unet \
+    --train_images data/train/images \
+    --train_masks data/train/masks \
+    --val_images data/val/images \
+    --val_masks data/val/masks \
+    --epochs 100 \
+    --batch_size 4 \
+    --experiment_name unet_binary_v1
 ```
 
-### Étape 6: Test en temps réel dans CARLA
+#### 3.3 Reprendre un entraînement
+
 ```bash
-# Lancer CARLA d'abord
-python carla_scripts/test_realtime.py \
-    --checkpoint checkpoints/best_model.pth \
-    --width 800 \
-    --height 600 \
-    --save_video \
-    --output results_video.avi
+python training/train.py \
+    --model enet \
+    --resume checkpoints/enet_binary_v1_last.pth \
+    --epochs 150 \
+    --experiment_name enet_binary_v1_continued
 ```
 
-## 📊 Visualisation avec TensorBoard
+#### 3.4 Visualisation avec TensorBoard
+
 ```bash
-# Pendant l'entraînement
 tensorboard --logdir runs/
-
-# Ouvrir http://localhost:6006 dans votre navigateur
+# Ouvrir http://localhost:6006
 ```
 
-## 🎯 Classes de segmentation
+### 4. Évaluation
 
+#### 4.1 Évaluation sur le dataset de test
 
+```bash
+python training/evaluate.py \
+    --checkpoint checkpoints/enet_binary_v1_best.pth \
+    --model enet \
+    --images data/test/images \
+    --masks data/test/masks \
+    --batch_size 8 \
+    --save_predictions \
+    --output evaluation_results
+```
+
+**Sortie** :
+- Métriques détaillées (mIoU, Pixel Accuracy, Dice)
+- Visualisations dans `evaluation_results/`
+
+#### 4.2 Évaluation sur une image unique
+
+```bash
+python training/evaluate.py \
+    --checkpoint checkpoints/enet_binary_v1_best.pth \
+    --model enet \
+    --single_image data/test/images/test_001.png \
+    --single_mask data/test/masks/test_001.npy \
+    --output evaluation_results
+```
+
+#### 4.3 Comparaison de plusieurs modèles
+
+```bash
+python training/evaluate.py \
+    --compare checkpoints/enet_binary_v1_best.pth \
+              checkpoints/unet_binary_v1_best.pth \
+    --compare_types enet unet \
+    --images data/test/images \
+    --masks data/test/masks
+```
+
+### 5. Test en temps réel dans CARLA
+
+```bash
+# Lancer CARLA d'abord !
+
+# Test basique
+python carla_scripts/test_realtime.py \
+    --checkpoint checkpoints/enet_binary_v1_best.pth \
+    --model enet
+
+# Test avec enregistrement vidéo
+python carla_scripts/test_realtime.py \
+    --checkpoint checkpoints/enet_binary_v1_best.pth \
+    --model enet \
+    --save_video \
+    --video_path results/demo.avi
+
+# Options avancées
+python carla_scripts/test_realtime.py \
+    --checkpoint checkpoints/enet_binary_v1_best.pth \
+    --model enet \
+    --camera_width 1024 \
+    --camera_height 768 \
+    --display_width 1920 \
+    --display_height 1080 \
+    --save_video \
+    --video_path results/demo_hd.avi
+```
+
+**Contrôles** :
+- `q` : Quitter
+- `s` : Sauvegarder la frame actuelle
+
+## 📁 Structure du projet
+
+```
+projet_segmentation/
+├── config.py                 # Configuration des classes et mapping binaire
+├── requirements.txt          # Dépendances Python
+│
+├── models/                   # Architectures des modèles
+│   ├── enet.py              # ENet (temps réel)
+│   └── unet.py              # U-Net (précision)
+│
+├── data/                     # Gestion des données
+│   └── dataset.py           # Dataset avec conversion automatique
+│
+├── training/                 # Scripts d'entraînement
+│   ├── train.py             # Entraînement principal
+│   └── evaluate.py          # Évaluation
+│
+├── utils/                    # Utilitaires
+│   ├── metrics.py           # Calcul des métriques
+│   └── visualization.py     # Visualisation
+│
+├── carla_scripts/           # Scripts CARLA
+│   ├── collect_images.py   # Collecte de données
+│   └── test_realtime.py    # Test temps réel
+│
+├── checkpoints/             # Modèles sauvegardés
+├── runs/                    # Logs TensorBoard
+└── data/                    # Données
+    ├── train/
+    │   ├── images/
+    │   └── masks/
+    ├── val/
+    │   ├── images/
+    │   └── masks/
+    └── test/
+        ├── images/
+        └── masks/
+```
+
+## 🔄 Mapping des classes
+
+Le fichier `config.py` définit le mapping des 23 classes CARLA vers 2 classes binaires :
+
+### Classes CARLA → Binaire
+
+**Traversable (0 - Vert)** :
+- Road (route)
+- RoadLine (ligne de route)
+- Sidewalk (trottoir)
+- Ground (sol)
+- Bridge (pont)
+- RailTrack (rail)
+- Terrain (terrain)
+
+**Obstrué (1 - Rouge)** :
+- Building (bâtiment)
+- Fence (barrière)
+- Pedestrian (piéton)
+- Pole (poteau)
+- Vegetation (végétation)
+- Vehicles (véhicules)
+- Wall (mur)
+- TrafficSign (panneau)
+- Sky (ciel)
+- TrafficLight (feu)
+- Et autres obstacles
+
+## 🌦️ Adaptation aux conditions extrêmes
+
+### Phase 1 : Entraînement de base
+
+Utilisez d'abord la collecte diversifiée pour obtenir des données dans différentes météos :
+
+```bash
+python carla_scripts/collect_images.py \
+    --output data/diverse \
+    --num_images 1000 \
+    --diverse
+```
+
+### Phase 2 : Data augmentation intensive
+
+Le dataset inclut déjà de l'augmentation pour simuler :
+- ☁️ Brouillard
+- 🌧️ Pluie
+- ❄️ Neige
+- 🌙 Conditions nocturnes
+- 💨 Flou de mouvement
+- 🔆 Variations de luminosité
+
+Pour activer l'augmentation intensive pendant l'entraînement, modifiez `data/dataset.py` :
+
+```python
+from data.dataset import get_heavy_augmentation
+
+# Dans train.py, remplacer get_training_augmentation par :
+transform = get_heavy_augmentation(image_size)
+```
+
+### Phase 3 : Fine-tuning spécifique
+
+Pour adapter à des conditions très spécifiques :
+
+1. Collectez des données dans ces conditions dans CARLA
+2. Fine-tunez le modèle pré-entraîné :
+
+```bash
+python training/train.py \
+    --model enet \
+    --resume checkpoints/enet_binary_v1_best.pth \
+    --train_images data/extreme_conditions/images \
+    --train_masks data/extreme_conditions/masks \
+    --epochs 20 \
+    --lr 1e-5 \
+    --experiment_name enet_finetuned_extreme
+```
 
 ## 📈 Métriques d'évaluation
 
-- **mIoU** (mean Intersection over Union): Métrique principale
-- **Pixel Accuracy**: Précision globale
-- **IoU par classe**: Performance par classe
-- **Dice Coefficient**: Alternative à l'IoU
+Le système calcule :
 
-## 💡 Conseils
+- **mIoU** (mean Intersection over Union) : Métrique principale
+- **Pixel Accuracy** : Précision globale
+- **Dice Coefficient** : Alternative à l'IoU
+- **IoU par classe** : Performance pour Traversable et Obstrué
 
-### Pour de meilleurs résultats:
+### Objectifs de performance
 
-1. **Annotation**: Annotez au moins 200-500 images pour un bon début
-2. **Qualité > Quantité**: Mieux vaut moins d'images bien annotées
-3. **Diversité**: Collectez des images dans différentes conditions (jour/nuit, météo, environnements)
-4. **Augmentation**: Activez la data augmentation pendant l'entraînement
-5. **Checkpoints**: Sauvegardez régulièrement vos modèles
+- **mIoU > 0.85** : Excellent
+- **mIoU > 0.80** : Très bon
+- **mIoU > 0.75** : Bon
+- **mIoU < 0.70** : Nécessite amélioration
 
-### Débogage:
+## 💡 Conseils pour de meilleurs résultats
+
+1. **Quantité de données** :
+   - Minimum : 500 images
+   - Recommandé : 2000-5000 images
+   - Optimal : 10000+ images
+
+2. **Diversité** :
+   - Collectez dans différentes cartes CARLA
+   - Variez les conditions météo
+   - Incluez jour et nuit
+   - Variez les scénarios (urbain, autoroute, rural)
+
+3. **Équilibrage des classes** :
+   - Utilisez `--weighted_loss` si déséquilibre
+   - Vérifiez la distribution avec `visualize_class_distribution()`
+
+4. **Optimisation** :
+   - ENet : ~60 FPS sur GPU moderne (RTX 3060+)
+   - U-Net : ~30 FPS sur GPU moderne
+   - Augmentez `batch_size` si vous avez plus de VRAM
+
+5. **Checkpoints** :
+   - Sauvegardez régulièrement
+   - Gardez le meilleur modèle (`_best.pth`)
+   - Expérimentez avec différents hyperparamètres
+
+## 🐛 Dépannage
+
+### CUDA Out of Memory
+
 ```bash
-# Vérifier la distribution des classes
-python -c "from utils.visualization import visualize_class_distribution; visualize_class_distribution('data/train/masks', 10)"
+# Réduire la taille du batch
+--batch_size 2
 
-# Visualiser quelques prédictions
-python training/evaluate.py --checkpoint checkpoints/best_model.pth ...
+# Réduire la taille des images
+--image_size 256
 ```
 
-## 🐛 Problèmes courants
-
-### CUDA out of memory
-- Réduire `batch_size` dans la config
-- Utiliser des images plus petites (resize_size)
-
-### Mauvaise performance
-- Vérifier la qualité des annotations
-- Augmenter le nombre d'epochs
-- Utiliser les class weights si déséquilibre
-
 ### CARLA ne se connecte pas
-- Vérifier que le serveur CARLA est lancé
-- Vérifier le port (défaut: 2000)
+
+```bash
+# Vérifier que CARLA est lancé
+ps aux | grep Carla
+
+# Vérifier le port
+--port 2000
+
+# Augmenter le timeout dans le code si connexion lente
+```
+
+### Mauvaises performances
+
+1. Vérifier la qualité des données
+2. Augmenter le nombre d'epochs
+3. Essayer différents learning rates
+4. Utiliser `--weighted_loss`
+5. Collecter plus de données
+
+## 📧 Support
+
+Pour toute question ou problème :
+- Consultez les logs TensorBoard
+- Vérifiez les métriques d'évaluation
+- Visualisez les prédictions
 
 ## 📝 Citation
 
-Si vous utilisez ce code pour votre recherche, merci de citer:
-```
+```bibtex
 @misc{segmentation_carla_2026,
-  author = {Votre Nom},
-  title = {Segmentation Sémantique pour Conduite Autonome avec CARLA},
-  year = {2026},
-  publisher = {GitHub},
-  url = {https://github.com/votre-repo}
+  title={Binary Semantic Segmentation for Autonomous Driving with CARLA},
+  author={Votre Nom},
+  year={2026},
+  url={https://github.com/votre-repo}
 }
 ```
 
@@ -248,20 +477,8 @@ Si vous utilisez ce code pour votre recherche, merci de citer:
 
 Ce projet est sous licence MIT.
 
-## 🤝 Contribution
-
-Les contributions sont les bienvenues! Pour contribuer:
-
-1. Fork le projet
-2. Créer une branche (`git checkout -b feature/AmazingFeature`)
-3. Commit vos changements (`git commit -m 'Add AmazingFeature'`)
-4. Push vers la branche (`git push origin feature/AmazingFeature`)
-5. Ouvrir une Pull Request
-
-## 📧 Contact
-
-Pour toute question: [votre.email@example.com]
-
 ---
 
 **Bon courage pour votre projet! 🚗🤖**
+
+Pour toute amélioration future, ce projet est conçu pour être facilement extensible. La séparation claire entre reconnaissance multi-classe et classification binaire permet d'adapter facilement le système à d'autres types de segmentation.

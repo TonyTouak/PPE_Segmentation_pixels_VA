@@ -1,6 +1,6 @@
 {
   "classes": [
-    { "id": 0, "name": "obstructed", "color": [255, 0, 0] },
-    { "id": 1, "name": "traversable", "color": [0, 255, 0] }
+    { "id": 0, "name": "background", "color": [0,0,0], "traversable": false },
+    { "id": 1, "name": "road", "color": [0,255,0], "traversable": true }
   ]
 }

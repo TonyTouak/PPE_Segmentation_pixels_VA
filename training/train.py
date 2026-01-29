@@ -1,557 +1,346 @@
 """
-Script d'entraînement principal pour la segmentation sémantique
+Script d'entraînement pour segmentation sémantique binaire
+Supporte ENet et U-Net avec conversion automatique multi-classe -> binaire
 """
+
+import os
+import sys
+import argparse
+import time
+from tqdm import tqdm
+import numpy as np
 
 import torch
 import torch.nn as nn
-from torch.utils.data import DataLoader, random_split
+import torch.optim as optim
+from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
-from pathlib import Path
-import json
-import time
-from tqdm import tqdm
-import argparse
-import sys
-sys.path.append(str(Path(__file__).parent.parent))
 
-from models.enet import ENet
-from models.unet import UNet
-from data.dataset import SegmentationDataset, load_config
-from data.augmentation import SegmentationTransform, ValTransform
-from utils.metrics import MetricsTracker, compute_miou, compute_pixel_accuracy
-from training.config import TrainingConfig, get_quick_test_config, get_full_training_config
+# Ajouter le chemin parent
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from models.enet import get_enet_model
+from models.unet import get_unet_model
+from data.dataset import SegmentationDataset, get_training_augmentation, get_validation_augmentation
+from config import NUM_BINARY_CLASSES, CLASS_WEIGHTS
+from utils.metrics import SegmentationMetrics
+from utils.visualization import visualize_predictions
 
 
 class Trainer:
-    """Classe principale pour gérer l'entraînement"""
+    """Entraîneur pour segmentation sémantique"""
     
-    def __init__(self, config: TrainingConfig):
-        """
-        Args:
-            config: Configuration d'entraînement
-        """
-        self.config = config
-        self.device = torch.device(config.device)
+    def __init__(self, model, train_loader, val_loader, criterion, optimizer, 
+                 device, experiment_name, checkpoint_dir='checkpoints'):
         
-        # Créer les dossiers nécessaires
-        self.checkpoint_dir = Path(config.checkpoint_dir)
-        self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
+        self.model = model
+        self.train_loader = train_loader
+        self.val_loader = val_loader
+        self.criterion = criterion
+        self.optimizer = optimizer
+        self.device = device
+        self.experiment_name = experiment_name
+        self.checkpoint_dir = checkpoint_dir
         
-        # Charger la configuration des classes
-        self.label_config = load_config(config.label_config)
-        self.class_names = [cls['name'] for cls in self.label_config['classes']]
+        # TensorBoard
+        self.writer = SummaryWriter(f'runs/{experiment_name}')
+        
+        # Métriques
+        self.metrics = SegmentationMetrics(num_classes=NUM_BINARY_CLASSES)
+        
+        # Meilleur score
+        self.best_miou = 0.0
+        
+        # Créer le dossier de checkpoints
+        os.makedirs(checkpoint_dir, exist_ok=True)
         
         print(f"\n{'='*60}")
-        print(f"INITIALISATION DE L'ENTRAÎNEMENT")
-        print(f"{'='*60}")
-        print(f"Device: {self.device}")
-        print(f"Modèle: {config.model_name}")
-        print(f"Nombre de classes: {config.num_classes}")
-        print(f"Classes: {', '.join(self.class_names)}")
+        print(f"Entraînement: {experiment_name}")
+        print(f"Device: {device}")
+        print(f"Nombre de paramètres: {sum(p.numel() for p in model.parameters()):,}")
         print(f"{'='*60}\n")
-        
-        # Initialiser le modèle
-        self.model = self._create_model()
-        self.model = self.model.to(self.device)
-        
-        # Compter les paramètres
-        total_params = sum(p.numel() for p in self.model.parameters())
-        trainable_params = sum(p.numel() for p in self.model.parameters() if p.requires_grad)
-        print(f"Paramètres du modèle:")
-        print(f"  Total: {total_params:,}")
-        print(f"  Entraînables: {trainable_params:,}\n")
-        
-        # Créer les datasets et dataloaders
-        self.train_loader, self.val_loader = self._create_dataloaders()
-        
-        # Créer la loss function
-        self.criterion = self._create_criterion()
-        
-        # Créer l'optimiseur
-        self.optimizer = self._create_optimizer()
-        
-        # Créer le scheduler
-        self.scheduler = self._create_scheduler()
-        
-        # Tensorboard
-        if config.use_tensorboard:
-            log_dir = Path(config.log_dir) / config.experiment_name
-            self.writer = SummaryWriter(log_dir)
-            print(f"Tensorboard log dir: {log_dir}")
-        else:
-            self.writer = None
-        
-        # Suivi de l'entraînement
-        self.current_epoch = 0
-        self.best_miou = 0.0
-        self.best_epoch = 0
-        self.train_losses = []
-        self.val_mious = []
-        
-        # Early stopping
-        self.patience_counter = 0
-        
-    def _create_model(self) -> nn.Module:
-        """Créer le modèle"""
-        if self.config.model_name.lower() == "unet":
-            model = UNet(
-                num_classes=self.config.num_classes,
-                in_channels=3,
-                **self.config.model_params
-            )
-        elif self.config.model_name.lower() == "enet":
-            model = ENet(
-                num_classes=self.config.num_classes,
-                **self.config.model_params
-            )
-        else:
-            raise ValueError(f"Modèle inconnu: {self.config.model_name}")
-        
-        return model
     
-    def _create_dataloaders(self):
-        """Créer les dataloaders pour train et validation"""
-        print("Chargement des données...")
-        
-        # Transformations
-        train_transform = SegmentationTransform(
-            resize_size=self.config.resize_size,
-            crop_size=self.config.crop_size,
-            horizontal_flip_prob=self.config.horizontal_flip_prob,
-            rotation_degrees=self.config.rotation_degrees,
-            color_jitter=self.config.color_jitter,
-            normalize=True
-        )
-        
-        val_transform = ValTransform(
-            resize_size=self.config.resize_size,
-            normalize=True
-        )
-        
-        # Dataset d'entraînement
-        try:
-            train_dataset = SegmentationDataset(
-                images_dir=self.config.train_images_dir,
-                masks_dir=self.config.train_masks_dir,
-                transform=train_transform,
-                num_classes=self.config.num_classes
-            )
-        except ValueError as e:
-            print(f"Erreur lors du chargement du dataset d'entraînement: {e}")
-            print("Assurez-vous que les dossiers contiennent des images et des masques correspondants")
-            sys.exit(1)
-        
-        # Dataset de validation
-        try:
-            val_dataset = SegmentationDataset(
-                images_dir=self.config.val_images_dir,
-                masks_dir=self.config.val_masks_dir,
-                transform=val_transform,
-                num_classes=self.config.num_classes
-            )
-        except ValueError as e:
-            print(f"Warning: Pas de dataset de validation trouvé")
-            print(f"On va créer un split train/val automatique (80/20)")
-            
-            # Split automatique
-            dataset_size = len(train_dataset)
-            val_size = int(0.2 * dataset_size)
-            train_size = dataset_size - val_size
-            
-            train_dataset, val_dataset = random_split(
-                train_dataset,
-                [train_size, val_size],
-                generator=torch.Generator().manual_seed(42)
-            )
-            
-            # Appliquer les transformations de validation au val_dataset
-            val_dataset.dataset.transform = val_transform
-        
-        print(f"Dataset d'entraînement: {len(train_dataset)} échantillons")
-        print(f"Dataset de validation: {len(val_dataset)} échantillons\n")
-        
-        # Dataloaders
-        train_loader = DataLoader(
-            train_dataset,
-            batch_size=self.config.batch_size,
-            shuffle=True,
-            num_workers=self.config.num_workers,
-            pin_memory=self.config.pin_memory,
-            drop_last=True
-        )
-        
-        val_loader = DataLoader(
-            val_dataset,
-            batch_size=self.config.batch_size,
-            shuffle=False,
-            num_workers=self.config.num_workers,
-            pin_memory=self.config.pin_memory
-        )
-        
-        return train_loader, val_loader
-    
-    def _create_criterion(self) -> nn.Module:
-        """Créer la fonction de loss"""
-        if self.config.use_class_weights:
-            # Calculer les poids des classes depuis le dataset d'entraînement
-            print("Calcul des poids des classes...")
-            weights = self.train_loader.dataset.get_class_weights()
-            weights = weights.to(self.device)
-            print(f"Poids des classes: {weights.cpu().numpy()}\n")
-        else:
-            weights = None
-        
-        criterion = nn.CrossEntropyLoss(weight=weights)
-
-        
-        return criterion
-    
-    def _create_optimizer(self):
-        """Créer l'optimiseur"""
-        if self.config.optimizer.lower() == "adam":
-            optimizer = torch.optim.Adam(
-                self.model.parameters(),
-                lr=self.config.learning_rate,
-                weight_decay=self.config.weight_decay
-            )
-        elif self.config.optimizer.lower() == "sgd":
-            optimizer = torch.optim.SGD(
-                self.model.parameters(),
-                lr=self.config.learning_rate,
-                momentum=self.config.momentum,
-                weight_decay=self.config.weight_decay
-            )
-        else:
-            raise ValueError(f"Optimiseur inconnu: {self.config.optimizer}")
-        
-        return optimizer
-    
-    def _create_scheduler(self):
-        """Créer le learning rate scheduler"""
-        if not self.config.use_scheduler:
-            return None
-        
-        if self.config.scheduler_type == "cosine":
-            scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-                self.optimizer,
-                T_max=self.config.num_epochs
-            )
-        elif self.config.scheduler_type == "step":
-            scheduler = torch.optim.lr_scheduler.StepLR(
-                self.optimizer,
-                step_size=self.config.lr_step_size,
-                gamma=self.config.lr_gamma
-            )
-        elif self.config.scheduler_type == "plateau":
-            scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-                self.optimizer,
-                mode='max',
-                factor=0.5,
-                patience=10,
-                verbose=True
-            )
-        else:
-            raise ValueError(f"Scheduler inconnu: {self.config.scheduler_type}")
-        
-        return scheduler
-    
-    def train_epoch(self) -> float:
-        """Entraîner le modèle pour une epoch"""
+    def train_epoch(self, epoch):
+        """Entraîne le modèle pour une epoch"""
         self.model.train()
-        total_loss = 0.0
+        epoch_loss = 0.0
+        self.metrics.reset()
         
-        pbar = tqdm(self.train_loader, desc=f"Epoch {self.current_epoch+1}/{self.config.num_epochs}")
+        pbar = tqdm(self.train_loader, desc=f'Epoch {epoch+1} [Train]')
         
         for batch_idx, (images, masks) in enumerate(pbar):
             images = images.to(self.device)
             masks = masks.to(self.device)
             
-            # Forward pass
-            self.optimizer.zero_grad()
+            # Forward
             outputs = self.model(images)
-            
-            # Calculer la loss
             loss = self.criterion(outputs, masks)
             
-            # Backward pass
+            # Backward
+            self.optimizer.zero_grad()
             loss.backward()
             self.optimizer.step()
             
-            # Accumuler la loss
-            total_loss += loss.item()
+            # Métriques
+            epoch_loss += loss.item()
+            preds = torch.argmax(outputs, dim=1)
+            self.metrics.update(preds, masks)
             
-            # Mettre à jour la barre de progression
-            pbar.set_postfix({
-                'loss': f'{loss.item():.4f}',
-                'avg_loss': f'{total_loss/(batch_idx+1):.4f}'
-            })
-            
-            # Logger dans tensorboard
-            if self.writer and batch_idx % self.config.print_every == 0:
-                global_step = self.current_epoch * len(self.train_loader) + batch_idx
-                self.writer.add_scalar('Train/BatchLoss', loss.item(), global_step)
+            # Mise à jour de la barre de progression
+            pbar.set_postfix({'loss': loss.item()})
         
-        avg_loss = total_loss / len(self.train_loader)
-        return avg_loss
+        # Calculer les métriques moyennes
+        avg_loss = epoch_loss / len(self.train_loader)
+        miou = self.metrics.get_miou()
+        pixel_acc = self.metrics.get_pixel_accuracy()
+        
+        return avg_loss, miou, pixel_acc
     
-    @torch.no_grad()
-    def validate(self) -> dict:
-        """Valider le modèle"""
+    def validate(self, epoch):
+        """Validation du modèle"""
         self.model.eval()
+        epoch_loss = 0.0
+        self.metrics.reset()
         
-        metrics_tracker = MetricsTracker(
-            num_classes=self.config.num_classes,
-            class_names=self.class_names
-        )
-        
-        val_loss = 0.0
-        
-        pbar = tqdm(self.val_loader, desc="Validation")
-        
-        for images, masks in pbar:
-            images = images.to(self.device)
-            masks = masks.to(self.device)
+        with torch.no_grad():
+            pbar = tqdm(self.val_loader, desc=f'Epoch {epoch+1} [Val]')
             
-            # Forward pass
-            outputs = self.model(images)
-            
-            # Calculer la loss
-            loss = self.criterion(outputs, masks)
-            val_loss += loss.item()
-            
-            # Mettre à jour les métriques
-            predictions = outputs.argmax(dim=1)
-            metrics_tracker.update(predictions, masks)
+            for images, masks in pbar:
+                images = images.to(self.device)
+                masks = masks.to(self.device)
+                
+                # Forward
+                outputs = self.model(images)
+                loss = self.criterion(outputs, masks)
+                
+                # Métriques
+                epoch_loss += loss.item()
+                preds = torch.argmax(outputs, dim=1)
+                self.metrics.update(preds, masks)
+                
+                pbar.set_postfix({'loss': loss.item()})
         
-        avg_val_loss = val_loss / len(self.val_loader)
-        metrics = metrics_tracker.get_metrics()
-        metrics['val_loss'] = avg_val_loss
+        # Calculer les métriques moyennes
+        avg_loss = epoch_loss / len(self.val_loader)
+        miou = self.metrics.get_miou()
+        pixel_acc = self.metrics.get_pixel_accuracy()
         
-        return metrics
+        return avg_loss, miou, pixel_acc
     
-    def save_checkpoint(self, metrics: dict, is_best: bool = False):
-        """Sauvegarder un checkpoint"""
+    def save_checkpoint(self, epoch, miou, is_best=False):
+        """Sauvegarde un checkpoint"""
         checkpoint = {
-            'epoch': self.current_epoch,
+            'epoch': epoch,
             'model_state_dict': self.model.state_dict(),
             'optimizer_state_dict': self.optimizer.state_dict(),
-            'scheduler_state_dict': self.scheduler.state_dict() if self.scheduler else None,
-            'metrics': metrics,
-            'config': self.config,
-            'best_miou': self.best_miou,
-            'class_names': self.class_names
+            'miou': miou,
+            'experiment_name': self.experiment_name
         }
         
-        # Sauvegarder le checkpoint régulier
-        checkpoint_path = self.checkpoint_dir / f"checkpoint_epoch_{self.current_epoch}.pth"
-        torch.save(checkpoint, checkpoint_path)
-        print(f"Checkpoint sauvegardé: {checkpoint_path}")
+        # Sauvegarder le dernier modèle
+        path = os.path.join(self.checkpoint_dir, f'{self.experiment_name}_last.pth')
+        torch.save(checkpoint, path)
         
         # Sauvegarder le meilleur modèle
         if is_best:
-            best_path = self.checkpoint_dir / "best_model.pth"
-            torch.save(checkpoint, best_path)
-            print(f"✓ Meilleur modèle sauvegardé: {best_path} (mIoU: {self.best_miou:.4f})")
-        
-        # Sauvegarder aussi le dernier modèle
-        last_path = self.checkpoint_dir / "last_model.pth"
-        torch.save(checkpoint, last_path)
+            path = os.path.join(self.checkpoint_dir, f'{self.experiment_name}_best.pth')
+            torch.save(checkpoint, path)
+            print(f"✓ Meilleur modèle sauvegardé (mIoU: {miou:.4f})")
     
-    def load_checkpoint(self, checkpoint_path: str):
-        """Charger un checkpoint"""
-        print(f"Chargement du checkpoint: {checkpoint_path}")
-        checkpoint = torch.load(checkpoint_path, map_location=self.device)
+    def train(self, num_epochs, save_every=5):
+        """Entraînement complet"""
+        print(f"Début de l'entraînement pour {num_epochs} epochs\n")
         
-        self.model.load_state_dict(checkpoint['model_state_dict'])
-        self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-        
-        if self.scheduler and checkpoint['scheduler_state_dict']:
-            self.scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
-        
-        self.current_epoch = checkpoint['epoch'] + 1
-        self.best_miou = checkpoint.get('best_miou', 0.0)
-        
-        print(f"Checkpoint chargé: epoch {checkpoint['epoch']}, best mIoU: {self.best_miou:.4f}")
-    
-    def check_early_stopping(self, current_miou: float) -> bool:
-        """
-        Vérifier si on doit arrêter l'entraînement
-        
-        Returns:
-            True si on doit arrêter
-        """
-        if not self.config.use_early_stopping:
-            return False
-        
-        if current_miou > self.best_miou + self.config.min_delta:
-            self.patience_counter = 0
-            return False
-        else:
-            self.patience_counter += 1
-            print(f"Early stopping counter: {self.patience_counter}/{self.config.patience}")
-            
-            if self.patience_counter >= self.config.patience:
-                print(f"\n⚠ Early stopping déclenché après {self.config.patience} epochs sans amélioration")
-                return True
-        
-        return False
-    
-    def train(self):
-        """Boucle d'entraînement principale"""
-        print(f"\n{'='*60}")
-        print("DÉBUT DE L'ENTRAÎNEMENT")
-        print(f"{'='*60}\n")
-        
-        # Charger un checkpoint si spécifié
-        if self.config.resume_from:
-            self.load_checkpoint(self.config.resume_from)
-        
-        start_time = time.time()
-        
-        for epoch in range(self.current_epoch, self.config.num_epochs):
-            self.current_epoch = epoch
-            
-            print(f"\n{'='*60}")
-            print(f"Epoch {epoch+1}/{self.config.num_epochs}")
-            print(f"{'='*60}")
-            
-            # Learning rate actuel
-            current_lr = self.optimizer.param_groups[0]['lr']
-            print(f"Learning rate: {current_lr:.6f}")
+        for epoch in range(num_epochs):
+            start_time = time.time()
             
             # Entraînement
-            train_loss = self.train_epoch()
-            self.train_losses.append(train_loss)
-            
-            print(f"\nTrain Loss: {train_loss:.4f}")
+            train_loss, train_miou, train_acc = self.train_epoch(epoch)
             
             # Validation
-            if (epoch + 1) % self.config.eval_every == 0:
-                print("\nÉvaluation sur le set de validation...")
-                val_metrics = self.validate()
-                
-                current_miou = val_metrics['mIoU']
-                self.val_mious.append(current_miou)
-                
-                print(f"\nRésultats de validation:")
-                print(f"  Val Loss: {val_metrics['val_loss']:.4f}")
-                print(f"  mIoU: {current_miou:.4f}")
-                print(f"  Pixel Accuracy: {val_metrics['Pixel_Accuracy']:.2f}%")
-                
-                # Logger dans tensorboard
-                if self.writer:
-                    self.writer.add_scalar('Train/Loss', train_loss, epoch)
-                    self.writer.add_scalar('Train/LR', current_lr, epoch)
-                    self.writer.add_scalar('Val/Loss', val_metrics['val_loss'], epoch)
-                    self.writer.add_scalar('Val/mIoU', current_miou, epoch)
-                    self.writer.add_scalar('Val/PixelAccuracy', val_metrics['Pixel_Accuracy'], epoch)
-                    
-                    # Logger les IoU par classe
-                    for cls_name in self.class_names:
-                        key = f"IoU/{cls_name}"
-                        if key in val_metrics:
-                            self.writer.add_scalar(f'Val/IoU_{cls_name}', val_metrics[key], epoch)
-                
-                # Vérifier si c'est le meilleur modèle
-                is_best = current_miou > self.best_miou
-                if is_best:
-                    improvement = current_miou - self.best_miou
-                    self.best_miou = current_miou
-                    self.best_epoch = epoch
-                    print(f"\n✓ Nouveau meilleur mIoU: {self.best_miou:.4f} (+{improvement:.4f})")
-                
-                # Sauvegarder le checkpoint
-                if (epoch + 1) % self.config.save_every == 0 or is_best:
-                    if self.config.save_best_only and not is_best:
-                        pass  # Ne sauvegarder que le meilleur
-                    else:
-                        self.save_checkpoint(val_metrics, is_best)
-                
-                # Vérifier early stopping
-                if self.check_early_stopping(current_miou):
-                    print(f"\nMeilleur mIoU atteint à l'epoch {self.best_epoch+1}: {self.best_miou:.4f}")
-                    break
+            val_loss, val_miou, val_acc = self.validate(epoch)
             
-            # Mettre à jour le scheduler
-            if self.scheduler:
-                if isinstance(self.scheduler, torch.optim.lr_scheduler.ReduceLROnPlateau):
-                    if (epoch + 1) % self.config.eval_every == 0:
-                        self.scheduler.step(current_miou)
-                else:
-                    self.scheduler.step()
+            epoch_time = time.time() - start_time
+            
+            # Logging
+            print(f"\nEpoch {epoch+1}/{num_epochs} - {epoch_time:.2f}s")
+            print(f"Train - Loss: {train_loss:.4f} | mIoU: {train_miou:.4f} | Acc: {train_acc:.4f}")
+            print(f"Val   - Loss: {val_loss:.4f} | mIoU: {val_miou:.4f} | Acc: {val_acc:.4f}")
+            
+            # TensorBoard
+            self.writer.add_scalar('Loss/train', train_loss, epoch)
+            self.writer.add_scalar('Loss/val', val_loss, epoch)
+            self.writer.add_scalar('mIoU/train', train_miou, epoch)
+            self.writer.add_scalar('mIoU/val', val_miou, epoch)
+            self.writer.add_scalar('Accuracy/train', train_acc, epoch)
+            self.writer.add_scalar('Accuracy/val', val_acc, epoch)
+            
+            # Sauvegarder checkpoint
+            is_best = val_miou > self.best_miou
+            if is_best:
+                self.best_miou = val_miou
+            
+            if (epoch + 1) % save_every == 0 or is_best:
+                self.save_checkpoint(epoch, val_miou, is_best)
+            
+            print()
         
-        # Fin de l'entraînement
-        total_time = time.time() - start_time
         print(f"\n{'='*60}")
-        print("ENTRAÎNEMENT TERMINÉ")
-        print(f"{'='*60}")
-        print(f"Temps total: {total_time/3600:.2f} heures")
-        print(f"Meilleur mIoU: {self.best_miou:.4f} (epoch {self.best_epoch+1})")
-        print(f"Modèles sauvegardés dans: {self.checkpoint_dir}")
+        print(f"Entraînement terminé!")
+        print(f"Meilleur mIoU: {self.best_miou:.4f}")
+        print(f"{'='*60}\n")
         
-        if self.writer:
-            self.writer.close()
-        
-        return self.best_miou
+        self.writer.close()
+
+
+def get_dataloader(images_dir, masks_dir, batch_size, image_size, 
+                   is_train=True, num_workers=4):
+    """Crée un DataLoader"""
+    
+    if is_train:
+        transform = get_training_augmentation(image_size)
+        shuffle = True
+    else:
+        transform = get_validation_augmentation(image_size)
+        shuffle = False
+    
+    dataset = SegmentationDataset(
+        images_dir=images_dir,
+        masks_dir=masks_dir,
+        transform=transform,
+        binary_output=True,
+        image_size=image_size
+    )
+    
+    loader = DataLoader(
+        dataset,
+        batch_size=batch_size,
+        shuffle=shuffle,
+        num_workers=num_workers,
+        pin_memory=True
+    )
+    
+    return loader
 
 
 def main():
-    """Fonction principale"""
-    parser = argparse.ArgumentParser(description="Entraînement de segmentation sémantique")
-    parser.add_argument('--config', type=str, choices=['quick', 'full', 'high_quality'], 
-                       default='full', help='Configuration prédéfinie')
-    parser.add_argument('--train_images', type=str, help='Dossier des images d\'entraînement')
-    parser.add_argument('--train_masks', type=str, help='Dossier des masques d\'entraînement')
-    parser.add_argument('--val_images', type=str, help='Dossier des images de validation')
-    parser.add_argument('--val_masks', type=str, help='Dossier des masques de validation')
-    parser.add_argument('--model', type=str, choices=['unet', 'enet'], 
-                       default='unet', help='Architecture du modèle')
-    parser.add_argument('--batch_size', type=int, help='Taille du batch')
-    parser.add_argument('--epochs', type=int, help='Nombre d\'epochs')
-    parser.add_argument('--lr', type=float, help='Learning rate')
-    parser.add_argument('--resume', type=str, help='Checkpoint à reprendre')
-    parser.add_argument('--experiment_name', type=str, default='segmentation_exp',
+    parser = argparse.ArgumentParser(description='Entraînement segmentation sémantique')
+    
+    # Données
+    parser.add_argument('--train_images', type=str, default='data/train/images',
+                       help='Dossier des images d\'entraînement')
+    parser.add_argument('--train_masks', type=str, default='data/train/masks',
+                       help='Dossier des masques d\'entraînement')
+    parser.add_argument('--val_images', type=str, default='data/val/images',
+                       help='Dossier des images de validation')
+    parser.add_argument('--val_masks', type=str, default='data/val/masks',
+                       help='Dossier des masques de validation')
+    
+    # Modèle
+    parser.add_argument('--model', type=str, default='enet', choices=['enet', 'unet', 'unet_small'],
+                       help='Architecture du modèle')
+    
+    # Entraînement
+    parser.add_argument('--epochs', type=int, default=100,
+                       help='Nombre d\'epochs')
+    parser.add_argument('--batch_size', type=int, default=8,
+                       help='Taille du batch')
+    parser.add_argument('--lr', type=float, default=5e-4,
+                       help='Learning rate')
+    parser.add_argument('--image_size', type=int, default=512,
+                       help='Taille des images (carré)')
+    parser.add_argument('--num_workers', type=int, default=4,
+                       help='Nombre de workers pour le DataLoader')
+    
+    # Checkpoints
+    parser.add_argument('--checkpoint_dir', type=str, default='checkpoints',
+                       help='Dossier de sauvegarde des checkpoints')
+    parser.add_argument('--experiment_name', type=str, default='experiment',
                        help='Nom de l\'expérience')
+    parser.add_argument('--resume', type=str, default=None,
+                       help='Chemin vers un checkpoint à reprendre')
+    
+    # Options
+    parser.add_argument('--weighted_loss', action='store_true',
+                       help='Utiliser une loss pondérée pour les classes')
     
     args = parser.parse_args()
     
-    # Charger la configuration de base
-    if args.config == 'quick':
-        config = get_quick_test_config()
-    elif args.config == 'high_quality':
-        config = get_high_quality_config()
+    # Device
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    print(f"Device: {device}")
+    
+    if device.type == 'cuda':
+        print(f"GPU: {torch.cuda.get_device_name(0)}")
+        print(f"CUDA Version: {torch.version.cuda}")
+    
+    # Créer les DataLoaders
+    print("\nChargement des données...")
+    image_size = (args.image_size, args.image_size)
+    
+    train_loader = get_dataloader(
+        args.train_images, args.train_masks,
+        args.batch_size, image_size, is_train=True,
+        num_workers=args.num_workers
+    )
+    
+    val_loader = get_dataloader(
+        args.val_images, args.val_masks,
+        args.batch_size, image_size, is_train=False,
+        num_workers=args.num_workers
+    )
+    
+    print(f"Train set: {len(train_loader.dataset)} images")
+    print(f"Val set: {len(val_loader.dataset)} images")
+    
+    # Créer le modèle
+    print(f"\nCréation du modèle: {args.model}")
+    
+    if args.model == 'enet':
+        model = get_enet_model(num_classes=NUM_BINARY_CLASSES)
+    elif args.model == 'unet':
+        model = get_unet_model(num_classes=NUM_BINARY_CLASSES, model_type='standard')
+    elif args.model == 'unet_small':
+        model = get_unet_model(num_classes=NUM_BINARY_CLASSES, model_type='small')
+    
+    model = model.to(device)
+    
+    # Loss function
+    if args.weighted_loss:
+        weights = torch.tensor(CLASS_WEIGHTS, dtype=torch.float32).to(device)
+        criterion = nn.CrossEntropyLoss(weight=weights)
+        print("Loss pondérée activée")
     else:
-        config = get_full_training_config()
+        criterion = nn.CrossEntropyLoss()
     
-    # Override avec les arguments en ligne de commande
-    if args.train_images:
-        config.train_images_dir = args.train_images
-    if args.train_masks:
-        config.train_masks_dir = args.train_masks
-    if args.val_images:
-        config.val_images_dir = args.val_images
-    if args.val_masks:
-        config.val_masks_dir = args.val_masks
-    if args.model:
-        config.model_name = args.model
-    if args.batch_size:
-        config.batch_size = args.batch_size
-    if args.epochs:
-        config.num_epochs = args.epochs
-    if args.lr:
-        config.learning_rate = args.lr
+    # Optimizer
+    optimizer = optim.Adam(model.parameters(), lr=args.lr)
+    
+    # Reprendre l'entraînement
+    start_epoch = 0
     if args.resume:
-        config.resume_from = args.resume
-    if args.experiment_name:
-        config.experiment_name = args.experiment_name
+        print(f"\nReprise depuis {args.resume}")
+        checkpoint = torch.load(args.resume)
+        model.load_state_dict(checkpoint['model_state_dict'])
+        optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        start_epoch = checkpoint['epoch'] + 1
+        print(f"Reprise à l'epoch {start_epoch}")
     
-    # Créer le trainer et lancer l'entraînement
-    trainer = Trainer(config)
-    best_miou = trainer.train()
+    # Créer le trainer
+    trainer = Trainer(
+        model=model,
+        train_loader=train_loader,
+        val_loader=val_loader,
+        criterion=criterion,
+        optimizer=optimizer,
+        device=device,
+        experiment_name=args.experiment_name,
+        checkpoint_dir=args.checkpoint_dir
+    )
     
-    print(f"\n✓ Entraînement terminé avec succès!")
-    print(f"Meilleur mIoU: {best_miou:.4f}")
+    # Entraîner
+    trainer.train(num_epochs=args.epochs)
 
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     main()

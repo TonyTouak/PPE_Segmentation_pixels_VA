@@ -1,264 +1,384 @@
 """
-Script d'évaluation pour tester un modèle entraîné
+Script d'évaluation pour modèle de segmentation
+Calcule les métriques détaillées sur le dataset de test
 """
 
-import torch
-import torch.nn as nn
-from torch.utils.data import DataLoader
-import numpy as np
-from pathlib import Path
-import argparse
-import cv2
-from tqdm import tqdm
+import os
 import sys
-sys.path.append(str(Path(__file__).parent.parent))
+import argparse
+from tqdm import tqdm
+import numpy as np
 
-from models.enet import ENet
-from models.unet import UNet
-from data.dataset import SegmentationDataset, load_config
-from data.augmentation import ValTransform
-from utils.metrics import MetricsTracker, compute_iou, compute_miou
+import torch
+from torch.utils.data import DataLoader
+
+# Ajouter le chemin parent
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from models.enet import get_enet_model
+from models.unet import get_unet_model
+from data.dataset import SegmentationDataset, get_validation_augmentation
+from utils.metrics import SegmentationMetrics
+from utils.visualization import visualize_predictions, visualize_batch_predictions
+from config import BINARY_CLASSES
 
 
-class Evaluator:
-    """Classe pour évaluer un modèle entraîné"""
+def evaluate_model(model, dataloader, device, save_predictions=False, output_dir=None):
+    """
+    Évalue le modèle sur un dataset
     
-    def __init__(self, checkpoint_path: str, images_dir: str, masks_dir: str, 
-                 output_dir: str = None, device: str = None):
-        """
-        Args:
-            checkpoint_path: Chemin vers le checkpoint du modèle
-            images_dir: Dossier contenant les images de test
-            masks_dir: Dossier contenant les masques de test
-            output_dir: Dossier pour sauvegarder les visualisations (optionnel)
-            device: Device à utiliser
-        """
-        self.device = torch.device(device if device else ('cuda' if torch.cuda.is_available() else 'cpu'))
-        self.output_dir = Path(output_dir) if output_dir else None
-        
-        if self.output_dir:
-            self.output_dir.mkdir(parents=True, exist_ok=True)
-        
-        print(f"Device: {self.device}")
-        print(f"Chargement du checkpoint: {checkpoint_path}")
-        
-        # Charger le checkpoint
-        checkpoint = torch.load(checkpoint_path, map_location=self.device)
-        self.config = checkpoint['config']
-        self.class_names = checkpoint['class_names']
-        
-        # Charger la configuration des couleurs
-        label_config = load_config(self.config.label_config)
-        self.class_colors = {cls['id']: tuple(cls['color']) for cls in label_config['classes']}
-        
-        # Créer le modèle
-        if self.config.model_name.lower() == "unet":
-            self.model = UNet(
-                num_classes=self.config.num_classes,
-                **self.config.model_params
-            )
-        elif self.config.model_name.lower() == "enet":
-            self.model = ENet(
-                num_classes=self.config.num_classes,
-                **self.config.model_params
-            )
-        
-        # Charger les poids
-        self.model.load_state_dict(checkpoint['model_state_dict'])
-        self.model = self.model.to(self.device)
-        self.model.eval()
-        
-        print(f"Modèle chargé: {self.config.model_name}")
-        print(f"Epoch: {checkpoint['epoch']}")
-        print(f"Best mIoU: {checkpoint.get('best_miou', 'N/A')}")
-        
-        # Créer le dataset de test
-        val_transform = ValTransform(
-            resize_size=self.config.resize_size,
-            normalize=True
-        )
-        
-        self.test_dataset = SegmentationDataset(
-            images_dir=images_dir,
-            masks_dir=masks_dir,
-            transform=val_transform,
-            num_classes=self.config.num_classes
-        )
-        
-        self.test_loader = DataLoader(
-            self.test_dataset,
-            batch_size=self.config.batch_size,
-            shuffle=False,
-            num_workers=self.config.num_workers,
-            pin_memory=self.config.pin_memory
-        )
-        
-        print(f"Dataset de test: {len(self.test_dataset)} échantillons\n")
+    Args:
+        model: Modèle à évaluer
+        dataloader: DataLoader du dataset de test
+        device: Device (cuda/cpu)
+        save_predictions: Sauvegarder les prédictions
+        output_dir: Dossier de sortie
     
-    @torch.no_grad()
-    def evaluate(self, save_predictions: bool = True):
-        """Évaluer le modèle sur le dataset de test"""
-        print("Évaluation en cours...")
-        
-        metrics_tracker = MetricsTracker(
-            num_classes=self.config.num_classes,
-            class_names=self.class_names
-        )
-        
-        for batch_idx, (images, masks) in enumerate(tqdm(self.test_loader)):
-            images = images.to(self.device)
-            masks = masks.to(self.device)
+    Returns:
+        metrics: Dictionnaire des métriques
+    """
+    model.eval()
+    metrics = SegmentationMetrics(num_classes=2)
+    
+    all_images = []
+    all_masks = []
+    all_predictions = []
+    
+    print("\nÉvaluation en cours...")
+    
+    with torch.no_grad():
+        for batch_idx, (images, masks) in enumerate(tqdm(dataloader)):
+            images = images.to(device)
+            masks = masks.to(device)
             
             # Prédiction
-            outputs = self.model(images)
-            predictions = outputs.argmax(dim=1)
+            outputs = model(images)
+            predictions = torch.argmax(outputs, dim=1)
             
-            # Mettre à jour les métriques
-            metrics_tracker.update(predictions, masks)
+            # Mise à jour des métriques
+            metrics.update(predictions, masks)
             
-            # Sauvegarder les visualisations
-            if save_predictions and self.output_dir:
-                self._save_predictions(images, masks, predictions, batch_idx)
+            # Sauvegarder pour visualisation
+            if save_predictions and batch_idx < 10:  # Sauvegarder les 10 premiers batches
+                all_images.extend(images.cpu())
+                all_masks.extend(masks.cpu())
+                all_predictions.extend(predictions.cpu())
+    
+    # Afficher le résumé
+    print("\n" + "="*60)
+    print("RÉSULTATS DE L'ÉVALUATION")
+    print("="*60)
+    
+    metrics.print_summary(class_names=list(BINARY_CLASSES.values()))
+    
+    # Sauvegarder les visualisations
+    if save_predictions and output_dir:
+        os.makedirs(output_dir, exist_ok=True)
         
-        # Afficher les résultats
+        # Visualiser par groupes de 4
+        for i in range(0, min(len(all_images), 40), 4):
+            end_idx = min(i + 4, len(all_images))
+            save_path = os.path.join(output_dir, f'predictions_{i//4:03d}.png')
+            
+            visualize_predictions(
+                torch.stack(all_images[i:end_idx]),
+                torch.stack(all_masks[i:end_idx]),
+                torch.stack(all_predictions[i:end_idx]),
+                num_samples=end_idx - i,
+                save_path=save_path
+            )
+        
+        print(f"\nVisualisations sauvegardées dans {output_dir}")
+    
+    return metrics.get_summary()
+
+
+def evaluate_single_image(model, image_path, mask_path, device, save_path=None):
+    """
+    Évalue le modèle sur une seule image
+    
+    Args:
+        model: Modèle à évaluer
+        image_path: Chemin de l'image
+        mask_path: Chemin du masque (optionnel)
+        device: Device
+        save_path: Chemin pour sauvegarder la visualisation
+    """
+    from PIL import Image
+    import torchvision.transforms as T
+    
+    model.eval()
+    
+    # Charger l'image
+    image = Image.open(image_path).convert('RGB')
+    original_size = image.size
+    
+    # Transformation
+    transform = T.Compose([
+        T.Resize((512, 512)),
+        T.ToTensor(),
+        T.Normalize(mean=[0.485, 0.456, 0.406],
+                   std=[0.229, 0.224, 0.225])
+    ])
+    
+    input_tensor = transform(image).unsqueeze(0).to(device)
+    
+    # Prédiction
+    with torch.no_grad():
+        output = model(input_tensor)
+        prediction = torch.argmax(output, dim=1).squeeze(0)
+    
+    # Charger le masque si disponible
+    mask = None
+    if mask_path and os.path.exists(mask_path):
+        if mask_path.endswith('.npy'):
+            mask = np.load(mask_path)
+        else:
+            mask = np.array(Image.open(mask_path))
+        
+        if len(mask.shape) == 3:
+            mask = mask[:, :, 0]
+        
+        mask = torch.from_numpy(mask)
+        
+        # Calculer les métriques
+        metrics = SegmentationMetrics(num_classes=2)
+        metrics.update(prediction.unsqueeze(0), mask.unsqueeze(0))
+        
         print("\n" + "="*60)
-        print("RÉSULTATS D'ÉVALUATION")
+        print("MÉTRIQUES POUR L'IMAGE")
         print("="*60)
-        metrics_tracker.print_metrics()
-        
-        return metrics_tracker.get_metrics()
+        metrics.print_summary(class_names=list(BINARY_CLASSES.values()))
     
-    def _save_predictions(self, images: torch.Tensor, masks: torch.Tensor, 
-                         predictions: torch.Tensor, batch_idx: int):
-        """Sauvegarder les visualisations des prédictions"""
-        batch_size = images.size(0)
-        
-        for i in range(batch_size):
-            # Dénormaliser l'image
-            img = images[i].cpu()
-            mean = torch.tensor([0.485, 0.456, 0.406]).view(3, 1, 1)
-            std = torch.tensor([0.229, 0.224, 0.225]).view(3, 1, 1)
-            img = img * std + mean
-            img = (img.numpy().transpose(1, 2, 0) * 255).astype(np.uint8)
-            img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
-            
-            # Convertir les masques en couleur
-            mask_color = self._mask_to_color(masks[i].cpu().numpy())
-            pred_color = self._mask_to_color(predictions[i].cpu().numpy())
-            
-            # Créer une visualisation combinée
-            h, w = img.shape[:2]
-            combined = np.zeros((h, w*3, 3), dtype=np.uint8)
-            combined[:, :w] = img
-            combined[:, w:2*w] = mask_color
-            combined[:, 2*w:] = pred_color
-            
-            # Ajouter des labels
-            cv2.putText(combined, "Image", (10, 30), 
-                       cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
-            cv2.putText(combined, "Ground Truth", (w+10, 30), 
-                       cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
-            cv2.putText(combined, "Prediction", (2*w+10, 30), 
-                       cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
-            
-            # Sauvegarder
-            idx = batch_idx * images.size(0) + i
-            output_path = self.output_dir / f"prediction_{idx:04d}.png"
-            cv2.imwrite(str(output_path), combined)
-    
-    def _mask_to_color(self, mask: np.ndarray) -> np.ndarray:
-        """Convertir un masque de classes en image RGB colorée"""
-        h, w = mask.shape
-        color_mask = np.zeros((h, w, 3), dtype=np.uint8)
-        
-        for class_id, color in self.class_colors.items():
-            color_mask[mask == class_id] = color
-        
-        return cv2.cvtColor(color_mask, cv2.COLOR_RGB2BGR)
-    
-    @torch.no_grad()
-    def predict_single_image(self, image_path: str, save_path: str = None):
-        """
-        Faire une prédiction sur une seule image
-        
-        Args:
-            image_path: Chemin vers l'image
-            save_path: Chemin de sauvegarde (optionnel)
-        """
-        from PIL import Image
-        
-        # Charger l'image
-        image = Image.open(image_path).convert('RGB')
-        original_size = image.size
-        
-        # Appliquer les transformations
-        transform = ValTransform(
-            resize_size=self.config.resize_size,
-            normalize=True
+    # Visualiser
+    if mask is not None:
+        visualize_predictions(
+            input_tensor.cpu(),
+            mask.unsqueeze(0),
+            prediction.unsqueeze(0),
+            num_samples=1,
+            save_path=save_path
         )
+    else:
+        # Visualiser seulement l'image et la prédiction
+        import matplotlib.pyplot as plt
+        from utils.visualization import colorize_mask
         
-        # Transform attend une image et un masque, on crée un masque vide
-        dummy_mask = np.zeros((image.size[1], image.size[0]), dtype=np.int64)
-        image_tensor, _ = transform(image, dummy_mask)
+        # Dénormaliser l'image
+        mean = torch.tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1)
+        std = torch.tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1)
+        img_denorm = input_tensor * std + mean
+        img_denorm = torch.clamp(img_denorm, 0, 1)
+        img_denorm = img_denorm.squeeze(0).permute(1, 2, 0).cpu().numpy()
         
-        # Ajouter la dimension batch
-        image_tensor = image_tensor.unsqueeze(0).to(self.device)
+        pred_colored = colorize_mask(prediction.cpu().numpy())
         
-        # Prédiction
-        output = self.model(image_tensor)
-        prediction = output.argmax(dim=1).squeeze(0).cpu().numpy()
+        fig, axes = plt.subplots(1, 2, figsize=(12, 6))
+        axes[0].imshow(img_denorm)
+        axes[0].set_title('Image Originale')
+        axes[0].axis('off')
         
-        # Redimensionner à la taille originale
-        prediction = cv2.resize(
-            prediction.astype(np.uint8),
-            original_size,
-            interpolation=cv2.INTER_NEAREST
-        )
+        axes[1].imshow(pred_colored)
+        axes[1].set_title('Prédiction')
+        axes[1].axis('off')
         
-        # Convertir en couleur
-        prediction_color = self._mask_to_color(prediction)
+        plt.tight_layout()
         
         if save_path:
-            cv2.imwrite(save_path, prediction_color)
-            print(f"Prédiction sauvegardée: {save_path}")
+            plt.savefig(save_path, dpi=150, bbox_inches='tight')
+            print(f"Visualisation sauvegardée: {save_path}")
+        else:
+            plt.show()
         
-        return prediction, prediction_color
+        plt.close()
+
+
+def compare_models(checkpoint_paths, model_types, dataloader, device):
+    """
+    Compare plusieurs modèles sur le même dataset
+    
+    Args:
+        checkpoint_paths: Liste des chemins de checkpoints
+        model_types: Liste des types de modèles
+        dataloader: DataLoader du dataset de test
+        device: Device
+    """
+    results = {}
+    
+    for checkpoint_path, model_type in zip(checkpoint_paths, model_types):
+        print(f"\n{'='*60}")
+        print(f"Évaluation: {os.path.basename(checkpoint_path)}")
+        print(f"{'='*60}")
+        
+        # Charger le modèle
+        checkpoint = torch.load(checkpoint_path, map_location=device)
+        
+        if model_type == 'enet':
+            model = get_enet_model(num_classes=2)
+        elif model_type == 'unet':
+            model = get_unet_model(num_classes=2, model_type='standard')
+        elif model_type == 'unet_small':
+            model = get_unet_model(num_classes=2, model_type='small')
+        
+        model.load_state_dict(checkpoint['model_state_dict'])
+        model.to(device)
+        
+        # Évaluer
+        metrics = evaluate_model(model, dataloader, device, save_predictions=False)
+        
+        results[os.path.basename(checkpoint_path)] = metrics
+    
+    # Afficher la comparaison
+    print("\n" + "="*60)
+    print("COMPARAISON DES MODÈLES")
+    print("="*60)
+    print(f"{'Modèle':<30} {'mIoU':<10} {'Pixel Acc':<12} {'Dice':<10}")
+    print("-"*60)
+    
+    for name, metrics in results.items():
+        print(f"{name:<30} {metrics['mIoU']:.4f}    {metrics['pixel_accuracy']:.4f}      {metrics['mean_dice']:.4f}")
+    
+    print("="*60 + "\n")
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Évaluation de modèle de segmentation")
+    parser = argparse.ArgumentParser(description='Évaluation du modèle de segmentation')
+    
+    # Modèle
     parser.add_argument('--checkpoint', type=str, required=True,
                        help='Chemin vers le checkpoint du modèle')
-    parser.add_argument('--images', type=str, required=True,
-                       help='Dossier contenant les images de test')
-    parser.add_argument('--masks', type=str, required=True,
-                       help='Dossier contenant les masques de test')
+    parser.add_argument('--model', type=str, default='enet',
+                       choices=['enet', 'unet', 'unet_small'],
+                       help='Type de modèle')
+    
+    # Données
+    parser.add_argument('--images', type=str, default='data/test/images',
+                       help='Dossier des images de test')
+    parser.add_argument('--masks', type=str, default='data/test/masks',
+                       help='Dossier des masques de test')
+    
+    # Évaluation
+    parser.add_argument('--batch_size', type=int, default=8,
+                       help='Taille du batch')
+    parser.add_argument('--save_predictions', action='store_true',
+                       help='Sauvegarder les visualisations des prédictions')
     parser.add_argument('--output', type=str, default='evaluation_results',
-                       help='Dossier de sortie pour les visualisations')
-    parser.add_argument('--device', type=str, default=None,
-                       help='Device à utiliser (cuda/cpu)')
+                       help='Dossier de sortie')
+    
+    # Image unique
     parser.add_argument('--single_image', type=str, default=None,
-                       help='Prédire sur une seule image')
+                       help='Évaluer sur une seule image')
+    parser.add_argument('--single_mask', type=str, default=None,
+                       help='Masque pour l\'image unique (optionnel)')
+    
+    # Comparaison
+    parser.add_argument('--compare', nargs='+', default=None,
+                       help='Liste de checkpoints à comparer')
+    parser.add_argument('--compare_types', nargs='+', default=None,
+                       help='Types de modèles correspondants')
     
     args = parser.parse_args()
     
-    # Créer l'évaluateur
-    evaluator = Evaluator(
-        checkpoint_path=args.checkpoint,
+    # Device
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    print(f"Device: {device}")
+    
+    # Mode: image unique
+    if args.single_image:
+        print(f"\nÉvaluation sur une seule image: {args.single_image}")
+        
+        # Charger le modèle
+        checkpoint = torch.load(args.checkpoint, map_location=device)
+        
+        if args.model == 'enet':
+            model = get_enet_model(num_classes=2)
+        elif args.model == 'unet':
+            model = get_unet_model(num_classes=2, model_type='standard')
+        elif args.model == 'unet_small':
+            model = get_unet_model(num_classes=2, model_type='small')
+        
+        model.load_state_dict(checkpoint['model_state_dict'])
+        model.to(device)
+        
+        save_path = os.path.join(args.output, 'single_prediction.png')
+        os.makedirs(args.output, exist_ok=True)
+        
+        evaluate_single_image(
+            model, args.single_image, args.single_mask,
+            device, save_path=save_path
+        )
+        
+        return
+    
+    # Mode: comparaison de modèles
+    if args.compare:
+        if args.compare_types is None or len(args.compare) != len(args.compare_types):
+            print("Erreur: --compare_types doit avoir la même longueur que --compare")
+            return
+        
+        # Créer le dataloader
+        dataset = SegmentationDataset(
+            images_dir=args.images,
+            masks_dir=args.masks,
+            transform=get_validation_augmentation((512, 512)),
+            binary_output=True
+        )
+        
+        dataloader = DataLoader(
+            dataset,
+            batch_size=args.batch_size,
+            shuffle=False,
+            num_workers=4
+        )
+        
+        compare_models(args.compare, args.compare_types, dataloader, device)
+        
+        return
+    
+    # Mode: évaluation standard
+    print(f"\nChargement du modèle depuis {args.checkpoint}...")
+    
+    checkpoint = torch.load(args.checkpoint, map_location=device)
+    
+    if args.model == 'enet':
+        model = get_enet_model(num_classes=2)
+    elif args.model == 'unet':
+        model = get_unet_model(num_classes=2, model_type='standard')
+    elif args.model == 'unet_small':
+        model = get_unet_model(num_classes=2, model_type='small')
+    
+    model.load_state_dict(checkpoint['model_state_dict'])
+    model.to(device)
+    
+    print("Modèle chargé avec succès!")
+    
+    # Créer le dataset et dataloader
+    print(f"\nChargement du dataset de test...")
+    
+    dataset = SegmentationDataset(
         images_dir=args.images,
         masks_dir=args.masks,
-        output_dir=args.output,
-        device=args.device
+        transform=get_validation_augmentation((512, 512)),
+        binary_output=True
     )
     
-    # Évaluation ou prédiction simple
-    if args.single_image:
-        output_path = Path(args.output) / f"{Path(args.single_image).stem}_prediction.png"
-        evaluator.predict_single_image(args.single_image, str(output_path))
-    else:
-        metrics = evaluator.evaluate(save_predictions=True)
-        print(f"\nVisualisations sauvegardées dans: {args.output}")
+    dataloader = DataLoader(
+        dataset,
+        batch_size=args.batch_size,
+        shuffle=False,
+        num_workers=4,
+        pin_memory=True
+    )
+    
+    print(f"Dataset de test: {len(dataset)} images")
+    
+    # Évaluer
+    evaluate_model(
+        model, dataloader, device,
+        save_predictions=args.save_predictions,
+        output_dir=args.output
+    )
 
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     main()

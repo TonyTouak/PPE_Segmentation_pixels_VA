@@ -1,248 +1,285 @@
 """
-Métriques pour évaluer la segmentation sémantique
+Métriques pour l'évaluation de la segmentation sémantique
+- IoU (Intersection over Union)
+- mIoU (mean IoU)
+- Pixel Accuracy
+- Dice Coefficient
 """
 
-import torch
 import numpy as np
-from typing import Dict, List
+import torch
 
 
-def compute_iou(pred: torch.Tensor, target: torch.Tensor, num_classes: int) -> torch.Tensor:
-    """
-    Calculer l'Intersection over Union (IoU) pour chaque classe
+class SegmentationMetrics:
+    """Calcul des métriques de segmentation sémantique"""
     
-    Args:
-        pred: Prédictions (B, H, W) avec des indices de classes
-        target: Ground truth (B, H, W) avec des indices de classes
-        num_classes: Nombre de classes
-        
-    Returns:
-        IoU tensor de shape (num_classes,)
-    """
-    ious = torch.zeros(num_classes)
-    pred = pred.view(-1)
-    target = target.view(-1)
-    
-    for cls in range(num_classes):
-        pred_inds = pred == cls
-        target_inds = target == cls
-        
-        intersection = (pred_inds & target_inds).sum().float()
-        union = (pred_inds | target_inds).sum().float()
-        
-        if union == 0:
-            ious[cls] = float('nan')  # Classe absente
-        else:
-            ious[cls] = intersection / union
-    
-    return ious
-
-
-def compute_miou(pred: torch.Tensor, target: torch.Tensor, num_classes: int) -> float:
-    """
-    Calculer le mean IoU (mIoU)
-    
-    Args:
-        pred: Prédictions (B, H, W)
-        target: Ground truth (B, H, W)
-        num_classes: Nombre de classes
-        
-    Returns:
-        mIoU moyen sur toutes les classes présentes
-    """
-    ious = compute_iou(pred, target, num_classes)
-    
-    # Ignorer les classes absentes (NaN)
-    valid_ious = ious[~torch.isnan(ious)]
-    
-    if len(valid_ious) == 0:
-        return 0.0
-    
-    return valid_ious.mean().item()
-
-
-def compute_pixel_accuracy(pred: torch.Tensor, target: torch.Tensor) -> float:
-    """
-    Calculer l'accuracy pixel par pixel
-    
-    Args:
-        pred: Prédictions (B, H, W)
-        target: Ground truth (B, H, W)
-        
-    Returns:
-        Accuracy en pourcentage
-    """
-    correct = (pred == target).sum().item()
-    total = target.numel()
-    
-    return 100.0 * correct / total
-
-
-def compute_dice_coefficient(pred: torch.Tensor, target: torch.Tensor, num_classes: int) -> torch.Tensor:
-    """
-    Calculer le coefficient de Dice pour chaque classe
-    
-    Args:
-        pred: Prédictions (B, H, W)
-        target: Ground truth (B, H, W)
-        num_classes: Nombre de classes
-        
-    Returns:
-        Dice coefficient tensor de shape (num_classes,)
-    """
-    dice_scores = torch.zeros(num_classes)
-    pred = pred.view(-1)
-    target = target.view(-1)
-    
-    for cls in range(num_classes):
-        pred_inds = pred == cls
-        target_inds = target == cls
-        
-        intersection = (pred_inds & target_inds).sum().float()
-        pred_sum = pred_inds.sum().float()
-        target_sum = target_inds.sum().float()
-        
-        if pred_sum + target_sum == 0:
-            dice_scores[cls] = float('nan')
-        else:
-            dice_scores[cls] = (2.0 * intersection) / (pred_sum + target_sum)
-    
-    return dice_scores
-
-
-class MetricsTracker:
-    """Classe pour suivre les métriques pendant l'entraînement"""
-    
-    def __init__(self, num_classes: int, class_names: List[str] = None):
+    def __init__(self, num_classes=2, ignore_index=None):
         """
         Args:
             num_classes: Nombre de classes
-            class_names: Noms des classes (optionnel)
+            ignore_index: Index de classe à ignorer (optionnel)
         """
         self.num_classes = num_classes
-        self.class_names = class_names or [f"Class {i}" for i in range(num_classes)]
+        self.ignore_index = ignore_index
         self.reset()
     
     def reset(self):
-        """Réinitialiser les métriques"""
-        self.iou_sum = torch.zeros(self.num_classes)
-        self.dice_sum = torch.zeros(self.num_classes)
-        self.class_counts = torch.zeros(self.num_classes)
-        self.total_correct = 0
-        self.total_pixels = 0
-        self.num_batches = 0
+        """Réinitialise les compteurs"""
+        self.confusion_matrix = np.zeros((self.num_classes, self.num_classes), dtype=np.int64)
     
-    def update(self, pred: torch.Tensor, target: torch.Tensor):
+    def update(self, predictions, targets):
         """
-        Mettre à jour les métriques avec un nouveau batch
+        Met à jour la matrice de confusion
         
         Args:
-            pred: Prédictions (B, C, H, W) logits ou (B, H, W) indices
-            target: Ground truth (B, H, W)
+            predictions: Tensor de prédictions (B, H, W) ou (B, C, H, W)
+            targets: Tensor de targets (B, H, W)
         """
-        # Si pred contient des logits, prendre l'argmax
-        if pred.dim() == 4:
-            pred = pred.argmax(dim=1)
+        # Convertir en numpy
+        if torch.is_tensor(predictions):
+            if predictions.ndim == 4:  # (B, C, H, W)
+                predictions = torch.argmax(predictions, dim=1)
+            predictions = predictions.cpu().numpy()
         
-        # Déplacer sur CPU pour les calculs
-        pred = pred.cpu()
-        target = target.cpu()
+        if torch.is_tensor(targets):
+            targets = targets.cpu().numpy()
         
-        # IoU
-        ious = compute_iou(pred, target, self.num_classes)
-        for cls in range(self.num_classes):
-            if not torch.isnan(ious[cls]):
-                self.iou_sum[cls] += ious[cls]
-                self.class_counts[cls] += 1
+        # Aplatir
+        predictions = predictions.flatten()
+        targets = targets.flatten()
         
-        # Dice
-        dice_scores = compute_dice_coefficient(pred, target, self.num_classes)
-        for cls in range(self.num_classes):
-            if not torch.isnan(dice_scores[cls]):
-                self.dice_sum[cls] += dice_scores[cls]
+        # Ignorer les pixels spécifiés
+        if self.ignore_index is not None:
+            mask = targets != self.ignore_index
+            predictions = predictions[mask]
+            targets = targets[mask]
         
-        # Pixel accuracy
-        correct = (pred == target).sum().item()
-        total = target.numel()
-        self.total_correct += correct
-        self.total_pixels += total
+        # Assurer que les valeurs sont dans les limites
+        mask = (targets >= 0) & (targets < self.num_classes)
+        predictions = predictions[mask]
+        targets = targets[mask]
         
-        self.num_batches += 1
+        # Mise à jour de la matrice de confusion
+        for pred, target in zip(predictions, targets):
+            self.confusion_matrix[target, pred] += 1
     
-    def get_metrics(self) -> Dict[str, float]:
+    def get_confusion_matrix(self):
+        """Retourne la matrice de confusion"""
+        return self.confusion_matrix
+    
+    def get_iou_per_class(self):
         """
-        Obtenir les métriques moyennes
+        Calcule l'IoU pour chaque classe
         
         Returns:
-            Dictionnaire avec toutes les métriques
+            iou_per_class: Array des IoU par classe
         """
-        # IoU moyen par classe
-        mean_ious = {}
-        for cls in range(self.num_classes):
-            if self.class_counts[cls] > 0:
-                mean_ious[f"IoU/{self.class_names[cls]}"] = \
-                    (self.iou_sum[cls] / self.class_counts[cls]).item()
+        iou_per_class = np.zeros(self.num_classes)
         
-        # mIoU global
-        valid_ious = self.iou_sum[self.class_counts > 0] / self.class_counts[self.class_counts > 0]
-        miou = valid_ious.mean().item() if len(valid_ious) > 0 else 0.0
+        for i in range(self.num_classes):
+            # Intersection
+            intersection = self.confusion_matrix[i, i]
+            
+            # Union
+            union = (self.confusion_matrix[i, :].sum() + 
+                    self.confusion_matrix[:, i].sum() - 
+                    self.confusion_matrix[i, i])
+            
+            if union == 0:
+                iou_per_class[i] = float('nan')
+            else:
+                iou_per_class[i] = intersection / union
         
-        # Dice moyen par classe
-        mean_dice = {}
-        for cls in range(self.num_classes):
-            if self.class_counts[cls] > 0:
-                mean_dice[f"Dice/{self.class_names[cls]}"] = \
-                    (self.dice_sum[cls] / self.class_counts[cls]).item()
+        return iou_per_class
+    
+    def get_miou(self):
+        """
+        Calcule le mIoU (mean IoU)
         
-        # Pixel accuracy
-        pixel_acc = 100.0 * self.total_correct / self.total_pixels if self.total_pixels > 0 else 0.0
+        Returns:
+            miou: Mean IoU sur toutes les classes
+        """
+        iou_per_class = self.get_iou_per_class()
         
-        metrics = {
-            "mIoU": miou,
-            "Pixel_Accuracy": pixel_acc,
-            **mean_ious,
-            **mean_dice
+        # Ignorer les NaN (classes non présentes)
+        valid_ious = iou_per_class[~np.isnan(iou_per_class)]
+        
+        if len(valid_ious) == 0:
+            return 0.0
+        
+        return np.mean(valid_ious)
+    
+    def get_pixel_accuracy(self):
+        """
+        Calcule la précision pixel globale
+        
+        Returns:
+            pixel_accuracy: Pourcentage de pixels correctement classifiés
+        """
+        correct = np.diag(self.confusion_matrix).sum()
+        total = self.confusion_matrix.sum()
+        
+        if total == 0:
+            return 0.0
+        
+        return correct / total
+    
+    def get_dice_per_class(self):
+        """
+        Calcule le coefficient de Dice pour chaque classe
+        
+        Returns:
+            dice_per_class: Array des coefficients de Dice par classe
+        """
+        dice_per_class = np.zeros(self.num_classes)
+        
+        for i in range(self.num_classes):
+            # Intersection
+            intersection = self.confusion_matrix[i, i]
+            
+            # Somme des prédictions et targets pour cette classe
+            pred_sum = self.confusion_matrix[:, i].sum()
+            target_sum = self.confusion_matrix[i, :].sum()
+            
+            denominator = pred_sum + target_sum
+            
+            if denominator == 0:
+                dice_per_class[i] = float('nan')
+            else:
+                dice_per_class[i] = (2 * intersection) / denominator
+        
+        return dice_per_class
+    
+    def get_mean_dice(self):
+        """
+        Calcule le coefficient de Dice moyen
+        
+        Returns:
+            mean_dice: Mean Dice sur toutes les classes
+        """
+        dice_per_class = self.get_dice_per_class()
+        
+        # Ignorer les NaN
+        valid_dice = dice_per_class[~np.isnan(dice_per_class)]
+        
+        if len(valid_dice) == 0:
+            return 0.0
+        
+        return np.mean(valid_dice)
+    
+    def get_class_accuracy(self):
+        """
+        Calcule la précision pour chaque classe
+        
+        Returns:
+            accuracy_per_class: Array des précisions par classe
+        """
+        accuracy_per_class = np.zeros(self.num_classes)
+        
+        for i in range(self.num_classes):
+            total = self.confusion_matrix[i, :].sum()
+            
+            if total == 0:
+                accuracy_per_class[i] = float('nan')
+            else:
+                accuracy_per_class[i] = self.confusion_matrix[i, i] / total
+        
+        return accuracy_per_class
+    
+    def get_summary(self):
+        """
+        Retourne un résumé complet des métriques
+        
+        Returns:
+            summary: Dictionnaire avec toutes les métriques
+        """
+        iou_per_class = self.get_iou_per_class()
+        dice_per_class = self.get_dice_per_class()
+        accuracy_per_class = self.get_class_accuracy()
+        
+        summary = {
+            'mIoU': self.get_miou(),
+            'pixel_accuracy': self.get_pixel_accuracy(),
+            'mean_dice': self.get_mean_dice(),
+            'iou_per_class': iou_per_class,
+            'dice_per_class': dice_per_class,
+            'accuracy_per_class': accuracy_per_class,
+            'confusion_matrix': self.confusion_matrix
         }
         
-        return metrics
+        return summary
     
-    def print_metrics(self):
-        """Afficher les métriques de manière formatée"""
-        metrics = self.get_metrics()
+    def print_summary(self, class_names=None):
+        """
+        Affiche un résumé formaté des métriques
         
-        print("\n" + "="*50)
-        print("MÉTRIQUES D'ÉVALUATION")
-        print("="*50)
-        print(f"mIoU: {metrics['mIoU']:.4f}")
-        print(f"Pixel Accuracy: {metrics['Pixel_Accuracy']:.2f}%")
-        print("\nIoU par classe:")
-        for cls in range(self.num_classes):
-            key = f"IoU/{self.class_names[cls]}"
-            if key in metrics:
-                print(f"  {self.class_names[cls]}: {metrics[key]:.4f}")
-        print("="*50 + "\n")
+        Args:
+            class_names: Liste des noms de classes (optionnel)
+        """
+        if class_names is None:
+            class_names = [f"Class {i}" for i in range(self.num_classes)]
+        
+        summary = self.get_summary()
+        
+        print("\n" + "="*60)
+        print("RÉSUMÉ DES MÉTRIQUES")
+        print("="*60)
+        
+        print(f"\nMétriques globales:")
+        print(f"  mIoU:            {summary['mIoU']:.4f}")
+        print(f"  Pixel Accuracy:  {summary['pixel_accuracy']:.4f}")
+        print(f"  Mean Dice:       {summary['mean_dice']:.4f}")
+        
+        print(f"\nMétriques par classe:")
+        print(f"{'Classe':<20} {'IoU':<10} {'Dice':<10} {'Accuracy':<10}")
+        print("-"*60)
+        
+        for i, name in enumerate(class_names):
+            iou = summary['iou_per_class'][i]
+            dice = summary['dice_per_class'][i]
+            acc = summary['accuracy_per_class'][i]
+            
+            iou_str = f"{iou:.4f}" if not np.isnan(iou) else "N/A"
+            dice_str = f"{dice:.4f}" if not np.isnan(dice) else "N/A"
+            acc_str = f"{acc:.4f}" if not np.isnan(acc) else "N/A"
+            
+            print(f"{name:<20} {iou_str:<10} {dice_str:<10} {acc_str:<10}")
+        
+        print("\nMatrice de confusion:")
+        print(summary['confusion_matrix'])
+        print("="*60 + "\n")
+
+
+def compute_iou(pred, target, num_classes=2, ignore_index=None):
+    """
+    Fonction utilitaire pour calculer l'IoU rapidement
+    
+    Args:
+        pred: Prédictions (Tensor ou numpy array)
+        target: Ground truth (Tensor ou numpy array)
+        num_classes: Nombre de classes
+        ignore_index: Index à ignorer
+    
+    Returns:
+        iou: IoU moyen
+    """
+    metrics = SegmentationMetrics(num_classes, ignore_index)
+    metrics.update(pred, target)
+    return metrics.get_miou()
 
 
 if __name__ == "__main__":
     # Test des métriques
-    num_classes = 5
-    batch_size = 4
-    height, width = 128, 128
+    print("Test des métriques")
     
-    # Créer des prédictions et targets aléatoires
-    pred = torch.randint(0, num_classes, (batch_size, height, width))
-    target = torch.randint(0, num_classes, (batch_size, height, width))
+    # Créer des données de test
+    num_classes = 2
+    pred = torch.randint(0, num_classes, (4, 256, 256))
+    target = torch.randint(0, num_classes, (4, 256, 256))
     
     # Calculer les métriques
-    iou = compute_iou(pred, target, num_classes)
-    miou = compute_miou(pred, target, num_classes)
-    pixel_acc = compute_pixel_accuracy(pred, target)
+    metrics = SegmentationMetrics(num_classes=num_classes)
+    metrics.update(pred, target)
     
-    print(f"IoU par classe: {iou}")
-    print(f"mIoU: {miou:.4f}")
-    print(f"Pixel Accuracy: {pixel_acc:.2f}%")
-    
-    # Test du tracker
-    tracker = MetricsTracker(num_classes, [f"Class_{i}" for i in range(num_classes)])
-    tracker.update(pred, target)
-    tracker.print_metrics()
+    # Afficher le résumé
+    metrics.print_summary(class_names=['Traversable', 'Obstructed'])
