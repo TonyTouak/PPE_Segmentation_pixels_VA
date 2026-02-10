@@ -89,9 +89,11 @@ class RealtimeSegmentation:
     def setup_carla(self, host='localhost', port=2000):
         """Configure la connexion CARLA"""
         print(f"Connexion à CARLA ({host}:{port})...")
+        # Connexion au serveur CARLA
         self.client = carla.Client(host, port)
         self.client.set_timeout(10.0)
         
+        # Récupération du monde et des ressources
         self.world = self.client.get_world()
         self.blueprint_library = self.world.get_blueprint_library()
         
@@ -99,20 +101,23 @@ class RealtimeSegmentation:
     
     def spawn_vehicle_with_camera(self, camera_width=800, camera_height=600):
         """Spawn un véhicule avec caméra"""
-        # Spawn véhicule
+        # On choisit un véhicule
         vehicle_bp = self.blueprint_library.filter('vehicle.tesla.model3')[0]
+        # Un endroit d'apparition aléatoire
         spawn_points = self.world.get_map().get_spawn_points()
         spawn_point = np.random.choice(spawn_points)
         
+        # Crée le véhicule
         self.vehicle = self.world.spawn_actor(vehicle_bp, spawn_point)
         print(f"Véhicule spawné à {spawn_point.location}")
         
-        # Caméra RGB
+        # Crée la caméra RGB
         camera_bp = self.blueprint_library.find('sensor.camera.rgb')
         camera_bp.set_attribute('image_size_x', str(camera_width))
         camera_bp.set_attribute('image_size_y', str(camera_height))
         camera_bp.set_attribute('fov', '90')
         
+        # Crée la caméra sémantique à la même position
         camera_transform = carla.Transform(carla.Location(x=2.5, z=0.7))
         self.camera = self.world.spawn_actor(
             camera_bp, camera_transform, attach_to=self.vehicle)

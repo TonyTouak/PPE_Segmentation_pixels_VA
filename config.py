@@ -103,3 +103,29 @@ NUM_BINARY_CLASSES = len(BINARY_CLASSES)  # 2 classes
 
 # Poids des classes pour gérer le déséquilibre (à ajuster selon vos données)
 CLASS_WEIGHTS = [1.0, 2.0]  # [Traversable, Obstrué]
+
+# ============================================================================
+# CONFIGURATION DES DIMENSIONS D'IMAGES
+# ============================================================================
+
+# Dimensions de collecte CARLA (par défaut)
+CARLA_IMAGE_WIDTH = 800
+CARLA_IMAGE_HEIGHT = 600
+
+# Dimensions pour l'entraînement (résolution du modèle)
+# Options communes: 
+# - (512, 512): Bon compromis vitesse/qualité
+# - (256, 256): Très rapide, moins précis
+# - (768, 768): Plus précis, plus lent
+# - (1024, 1024): Haute résolution, GPU puissant requis
+TRAINING_IMAGE_SIZE = (512, 512)  # (H, W)
+
+# Préserver l'aspect ratio (recommandé pour éviter les distorsions)
+# Si True: utilise padding pour conserver les proportions
+# Si False: redimensionne directement (peut déformer)
+PRESERVE_ASPECT_RATIO = True
+
+# Dimensions pour le test temps réel
+REALTIME_CAMERA_WIDTH = 800
+REALTIME_CAMERA_HEIGHT = 600
+REALTIME_MODEL_SIZE = (512, 512)  # Résolution d'inférence du modèle

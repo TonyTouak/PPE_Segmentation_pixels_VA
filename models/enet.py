@@ -9,7 +9,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-
+# On réduit la taille de l’image dès le début pour économiser du calcul.
 class InitialBlock(nn.Module):
     """Bloc initial - downsampling agressif"""
     def __init__(self, in_channels=3, out_channels=16):
@@ -21,17 +21,20 @@ class InitialBlock(nn.Module):
         self.relu = nn.ReLU(inplace=True)
     
     def forward(self, x):
-        # Branche convolution
+        # On effectue une convolution pour extraire les caractéristiques importantes de l'image
         conv_out = self.conv(x)
-        # Branche pooling
+        # On utilise un pooling pour réduire la taille de l'image tout en gardant les éléments importants
         pool_out = self.pool(x)
-        # Concaténation
+        # On fusionne la convolution avec le pooling
         out = torch.cat([conv_out, pool_out], dim=1)
         out = self.bn(out)
         out = self.relu(out)
+        # On réduit de moitié l'image d'origine
         return out
 
-
+# On réduit encore la taille de l'image pour les calculs
+# On utilise le principe "bottleneck" : réduit les canaux puis les restaure
+# 64 canaux → 16 canaux (interne) → 64 canaux
 class BottleneckDownsampling(nn.Module):
     """Bottleneck avec downsampling"""
     def __init__(self, in_channels, out_channels, dropout_prob=0.1):
@@ -39,7 +42,7 @@ class BottleneckDownsampling(nn.Module):
         
         internal_channels = in_channels // 4
         
-        # Main branch
+        # Branche principale
         self.conv1 = nn.Conv2d(in_channels, internal_channels, 
                               kernel_size=2, stride=2, bias=False)
         self.bn1 = nn.BatchNorm2d(internal_channels)
@@ -55,14 +58,14 @@ class BottleneckDownsampling(nn.Module):
         self.relu = nn.ReLU(inplace=True)
         self.dropout = nn.Dropout2d(p=dropout_prob)
         
-        # Skip connection avec pooling
+        #MaxPooling réduit la taille mais mémorise où étaient les maxima
         self.pool = nn.MaxPool2d(kernel_size=2, stride=2, return_indices=True)
         self.conv_skip = nn.Conv2d(in_channels, out_channels, 
                                    kernel_size=1, bias=False)
         self.bn_skip = nn.BatchNorm2d(out_channels)
     
     def forward(self, x):
-        # Main branch
+
         out = self.conv1(x)
         out = self.bn1(out)
         out = self.relu(out)
@@ -87,6 +90,10 @@ class BottleneckDownsampling(nn.Module):
         return out, indices
 
 
+
+# Ne change pas la taille, mais extrait des features complexes
+# Utilise la dilation pour avoir un grand champ de vision sans perte de résolution
+# dilation=16 : regarde une zone 33x33 avec un kernel 3x3
 class BottleneckRegular(nn.Module):
     """Bottleneck régulier (sans downsampling)"""
     def __init__(self, channels, dropout_prob=0.1, dilation=1):
@@ -131,6 +138,8 @@ class BottleneckRegular(nn.Module):
         return out
 
 
+# Augmente la taille : 128x128 → 256x256 → 512x512
+# Utilise des convolutions transposées pour "reconstruire" l'image
 class BottleneckUpsampling(nn.Module):
     """Bottleneck avec upsampling"""
     def __init__(self, in_channels, out_channels, dropout_prob=0.1):
@@ -155,7 +164,7 @@ class BottleneckUpsampling(nn.Module):
         self.relu = nn.ReLU(inplace=True)
         self.dropout = nn.Dropout2d(p=dropout_prob)
         
-        # Skip connection
+        # MaxUnpooling utilise les indices du maxima pour "reconstruire" précisément l'image
         self.unpool = nn.MaxUnpool2d(kernel_size=2, stride=2)
         self.conv_skip = nn.Conv2d(in_channels, out_channels, 
                                    kernel_size=1, bias=False)

@@ -10,6 +10,7 @@ from torch.utils.data import Dataset
 from PIL import Image
 import albumentations as A
 from albumentations.pytorch import ToTensorV2
+import cv2
 import sys
 
 # Ajouter le chemin parent pour importer config
@@ -66,12 +67,12 @@ class SegmentationDataset(Dataset):
         return len(self.image_files)
     
     def __getitem__(self, idx):
-        # Charger l'image
+        # On charge l'image
         img_name = self.image_files[idx]
         img_path = os.path.join(self.images_dir, img_name)
         image = np.array(Image.open(img_path).convert('RGB'))
         
-        # Charger le masque (peut être .png ou .npy)
+        # On charge le masque associé (peut être .png ou .npy)
         mask_name = os.path.splitext(img_name)[0]
         mask_path_png = os.path.join(self.masks_dir, f"{mask_name}.png")
         mask_path_npy = os.path.join(self.masks_dir, f"{mask_name}.npy")
@@ -83,21 +84,21 @@ class SegmentationDataset(Dataset):
         else:
             raise FileNotFoundError(f"Masque introuvable pour {img_name}")
         
-        # Assurer que le masque est 2D
+        # On s'assure que le masque est en 2D
         if len(mask.shape) == 3:
             mask = mask[:, :, 0]
         
-        # Conversion vers binaire si nécessaire
+        # On convertit en binaire
         if self.binary_output:
             mask = self._convert_to_binary(mask)
         
-        # Appliquer les transformations
+        # On applique les transformations
         if self.transform:
             transformed = self.transform(image=image, mask=mask)
             image = transformed['image']
             mask = transformed['mask']
         
-        # Convertir le masque en tensor long
+        # On convertit le masque en tensor long
         if not isinstance(mask, torch.Tensor):
             mask = torch.from_numpy(mask).long()
         else:
@@ -142,12 +143,24 @@ class SegmentationDataset(Dataset):
         return image, mask
 
 
-def get_training_augmentation(image_size=(512, 512)):
+def get_training_augmentation(image_size=(512, 512), preserve_aspect_ratio=False):
     """
     Retourne les transformations d'augmentation pour l'entraînement
+    
+    Args:
+        image_size: Taille cible (H, W)
+        preserve_aspect_ratio: Si True, utilise padding au lieu de déformation
     """
-    return A.Compose([
-        A.Resize(height=image_size[0], width=image_size[1]),
+    if preserve_aspect_ratio:
+        transforms = [
+            A.LongestMaxSize(max_size=max(image_size)),
+            A.PadIfNeeded(min_height=image_size[0], min_width=image_size[1],
+                         border_mode=cv2.BORDER_CONSTANT, value=0)
+        ]
+    else:
+        transforms = [A.Resize(height=image_size[0], width=image_size[1])]
+    
+    return A.Compose(transforms + [
         
         # Augmentations géométriques
         A.HorizontalFlip(p=0.5),
@@ -175,32 +188,58 @@ def get_training_augmentation(image_size=(512, 512)):
     ])
 
 
-def get_validation_augmentation(image_size=(512, 512)):
+def get_validation_augmentation(image_size=(512, 512), preserve_aspect_ratio=False):
     """
     Retourne les transformations pour la validation (sans augmentation)
+    
+    Args:
+        image_size: Taille cible (H, W)
+        preserve_aspect_ratio: Si True, utilise padding au lieu de déformation
     """
-    return A.Compose([
-        A.Resize(height=image_size[0], width=image_size[1]),
-        A.Normalize(mean=[0.485, 0.456, 0.406], 
-                   std=[0.229, 0.224, 0.225]),
-        ToTensorV2()
-    ])
+    if preserve_aspect_ratio:
+        return A.Compose([
+            A.LongestMaxSize(max_size=max(image_size)),
+            A.PadIfNeeded(min_height=image_size[0], min_width=image_size[1],
+                         border_mode=cv2.BORDER_CONSTANT, value=0),
+            A.Normalize(mean=[0.485, 0.456, 0.406], 
+                       std=[0.229, 0.224, 0.225]),
+            ToTensorV2()
+        ])
+    else:
+        return A.Compose([
+            A.Resize(height=image_size[0], width=image_size[1]),
+            A.Normalize(mean=[0.485, 0.456, 0.406], 
+                       std=[0.229, 0.224, 0.225]),
+            ToTensorV2()
+        ])
 
 
-def get_heavy_augmentation(image_size=(512, 512)):
+def get_heavy_augmentation(image_size=(512, 512), preserve_aspect_ratio=False):
     """
     Augmentation intensive pour simuler conditions extrêmes
     (brouillard, pluie, neige, nuit)
+    
+    Args:
+        image_size: Taille cible (H, W)
+        preserve_aspect_ratio: Si True, utilise padding au lieu de déformation
     """
-    return A.Compose([
-        A.Resize(height=image_size[0], width=image_size[1]),
+    if preserve_aspect_ratio:
+        transforms = [
+            A.LongestMaxSize(max_size=max(image_size)),
+            A.PadIfNeeded(min_height=image_size[0], min_width=image_size[1],
+                         border_mode=cv2.BORDER_CONSTANT, value=0)
+        ]
+    else:
+        transforms = [A.Resize(height=image_size[0], width=image_size[1])]
+    
+    return A.Compose(transforms + [
         
-        # Géométrie
+        # On oriente l'image pour que notre modèle reconnaise un pbjet quelque soit sa position/orientation
         A.HorizontalFlip(p=0.5),
         A.ShiftScaleRotate(shift_limit=0.15, scale_limit=0.15, 
                           rotate_limit=20, p=0.6),
         
-        # Conditions météo extrêmes
+        # On modifie l'image pour la rendre robuste à des conditions météo extrêmes
         A.OneOf([
             # Brouillard
             A.RandomFog(fog_coef_lower=0.3, fog_coef_upper=0.8, p=1.0),
@@ -211,11 +250,11 @@ def get_heavy_augmentation(image_size=(512, 512)):
             A.RandomSnow(snow_point_lower=0.1, snow_point_upper=0.3, p=1.0),
         ], p=0.4),
         
-        # Luminosité (jour/nuit)
+        # On joue aussi avec la luminosité
         A.RandomBrightnessContrast(brightness_limit=0.3, 
                                   contrast_limit=0.3, p=0.7),
         
-        # Ombres
+        # Les Ombres
         A.RandomShadow(num_shadows_lower=1, num_shadows_upper=2, p=0.3),
         
         # Bruit

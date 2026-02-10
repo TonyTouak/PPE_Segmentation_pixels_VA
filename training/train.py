@@ -22,7 +22,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from models.enet import get_enet_model
 from models.unet import get_unet_model
 from data.dataset import SegmentationDataset, get_training_augmentation, get_validation_augmentation
-from config import NUM_BINARY_CLASSES, CLASS_WEIGHTS
+from config import NUM_BINARY_CLASSES, CLASS_WEIGHTS, TRAINING_IMAGE_SIZE, PRESERVE_ASPECT_RATIO
 from utils.metrics import SegmentationMetrics
 from utils.visualization import visualize_predictions
 
@@ -30,6 +30,7 @@ from utils.visualization import visualize_predictions
 class Trainer:
     """Entraîneur pour segmentation sémantique"""
     
+    # On initialise nos metrics et le TensorBoard pour voir l'évolution en direct
     def __init__(self, model, train_loader, val_loader, criterion, optimizer, 
                  device, experiment_name, checkpoint_dir='checkpoints'):
         
@@ -54,12 +55,12 @@ class Trainer:
         # Créer le dossier de checkpoints
         os.makedirs(checkpoint_dir, exist_ok=True)
         
-        print(f"\n{'='*60}")
         print(f"Entraînement: {experiment_name}")
         print(f"Device: {device}")
         print(f"Nombre de paramètres: {sum(p.numel() for p in model.parameters()):,}")
-        print(f"{'='*60}\n")
     
+    # Le modèle regarde un groupe d'images (batch), fait une prédiction, 
+    # voit son erreur, et ajuste ses neurones pour faire mieux la prochaine fois
     def train_epoch(self, epoch):
         """Entraîne le modèle pour une epoch"""
         self.model.train()
@@ -72,13 +73,15 @@ class Trainer:
             images = images.to(self.device)
             masks = masks.to(self.device)
             
-            # Forward
+            # On essaie de deviner où se trouve la route (Forward)
             outputs = self.model(images)
+            # On calcule l'erreur, la différence entre prédiction et réalité
             loss = self.criterion(outputs, masks)
             
-            # Backward
+            # On remonte le réseau pour voir la résponsabilité de chaque neuronne (Backpropagation)
             self.optimizer.zero_grad()
             loss.backward()
+            # On ajuste les poids pour diminuer l'erreur
             self.optimizer.step()
             
             # Métriques
@@ -89,13 +92,14 @@ class Trainer:
             # Mise à jour de la barre de progression
             pbar.set_postfix({'loss': loss.item()})
         
-        # Calculer les métriques moyennes
+        # On calcule les métriques moyennes
         avg_loss = epoch_loss / len(self.train_loader)
         miou = self.metrics.get_miou()
         pixel_acc = self.metrics.get_pixel_accuracy()
         
         return avg_loss, miou, pixel_acc
     
+    # Le test avec des images inconnues du modèle
     def validate(self, epoch):
         """Validation du modèle"""
         self.model.eval()
@@ -127,6 +131,7 @@ class Trainer:
         
         return avg_loss, miou, pixel_acc
     
+    # On sauvegarde l'entrainement du programme à chaque étape pour pouvoir le continuer ultérieurement
     def save_checkpoint(self, epoch, miou, is_best=False):
         """Sauvegarde un checkpoint"""
         checkpoint = {
@@ -193,15 +198,21 @@ class Trainer:
         self.writer.close()
 
 
-def get_dataloader(images_dir, masks_dir, batch_size, image_size, 
-                   is_train=True, num_workers=4):
+def get_dataloader(images_dir, masks_dir, batch_size, image_size=None, 
+                   is_train=True, num_workers=4, preserve_aspect_ratio=None):
     """Crée un DataLoader"""
     
+    # Utiliser les valeurs par défaut de config.py si non spécifiées
+    if image_size is None:
+        image_size = TRAINING_IMAGE_SIZE
+    if preserve_aspect_ratio is None:
+        preserve_aspect_ratio = PRESERVE_ASPECT_RATIO
+    
     if is_train:
-        transform = get_training_augmentation(image_size)
+        transform = get_training_augmentation(image_size, preserve_aspect_ratio)
         shuffle = True
     else:
-        transform = get_validation_augmentation(image_size)
+        transform = get_validation_augmentation(image_size, preserve_aspect_ratio)
         shuffle = False
     
     dataset = SegmentationDataset(
@@ -247,8 +258,8 @@ def main():
                        help='Taille du batch')
     parser.add_argument('--lr', type=float, default=5e-4,
                        help='Learning rate')
-    parser.add_argument('--image_size', type=int, default=512,
-                       help='Taille des images (carré)')
+    parser.add_argument('--image_size', type=int, default=None,
+                       help='Taille des images (carré). Si non spécifié, utilise config.TRAINING_IMAGE_SIZE')
     parser.add_argument('--num_workers', type=int, default=4,
                        help='Nombre de workers pour le DataLoader')
     
@@ -260,7 +271,7 @@ def main():
     parser.add_argument('--resume', type=str, default=None,
                        help='Chemin vers un checkpoint à reprendre')
     
-    # Options
+    # On donne un poids aux classes importantes (ex : piéton > goudron)
     parser.add_argument('--weighted_loss', action='store_true',
                        help='Utiliser une loss pondérée pour les classes')
     
@@ -276,7 +287,16 @@ def main():
     
     # Créer les DataLoaders
     print("\nChargement des données...")
-    image_size = (args.image_size, args.image_size)
+    
+    # Utiliser la taille d'image spécifiée ou celle par défaut de config.py
+    if args.image_size:
+        image_size = (args.image_size, args.image_size)
+        print(f"Taille d'image personnalisée: {image_size}")
+    else:
+        image_size = TRAINING_IMAGE_SIZE
+        print(f"Taille d'image par défaut: {image_size}")
+    
+    print(f"Préservation de l'aspect ratio: {PRESERVE_ASPECT_RATIO}")
     
     train_loader = get_dataloader(
         args.train_images, args.train_masks,

@@ -22,7 +22,7 @@ from utils.metrics import SegmentationMetrics
 from utils.visualization import visualize_predictions, visualize_batch_predictions
 from config import BINARY_CLASSES
 
-
+# 1- Evalue sur la totalité du dataset
 def evaluate_model(model, dataloader, device, save_predictions=False, output_dir=None):
     """
     Évalue le modèle sur un dataset
@@ -65,9 +65,7 @@ def evaluate_model(model, dataloader, device, save_predictions=False, output_dir
                 all_predictions.extend(predictions.cpu())
     
     # Afficher le résumé
-    print("\n" + "="*60)
-    print("RÉSULTATS DE L'ÉVALUATION")
-    print("="*60)
+    print("\nRÉSULTATS DE L'ÉVALUATION")
     
     metrics.print_summary(class_names=list(BINARY_CLASSES.values()))
     
@@ -93,6 +91,7 @@ def evaluate_model(model, dataloader, device, save_predictions=False, output_dir
     return metrics.get_summary()
 
 
+# Evalue sur une seule image, pour une analyse rapide
 def evaluate_single_image(model, image_path, mask_path, device, save_path=None):
     """
     Évalue le modèle sur une seule image
@@ -192,7 +191,7 @@ def evaluate_single_image(model, image_path, mask_path, device, save_path=None):
         
         plt.close()
 
-
+# Permet de choisir le meilleur modèle (ENet vs U-Net)
 def compare_models(checkpoint_paths, model_types, dataloader, device):
     """
     Compare plusieurs modèles sur le même dataset

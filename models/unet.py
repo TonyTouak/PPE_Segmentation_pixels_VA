@@ -9,7 +9,9 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-
+# On effectue une double convolution : 
+# -> Première conv : détecte des caractéristiques simples (bords)
+# -> Deuxième conv : combine ces caractéristiques en motifs plus complexes
 class DoubleConv(nn.Module):
     """Double convolution: Conv2d -> BatchNorm -> ReLU -> Conv2d -> BatchNorm -> ReLU"""
     def __init__(self, in_channels, out_channels, mid_channels=None):
@@ -35,7 +37,9 @@ class Down(nn.Module):
     def __init__(self, in_channels, out_channels):
         super(Down, self).__init__()
         self.maxpool_conv = nn.Sequential(
+            # On réduit de moitié les dimensions de l'image
             nn.MaxPool2d(2),
+            # On effectue une double convolution pour en extraire les caractéristiques
             DoubleConv(in_channels, out_channels)
         )
     
@@ -59,14 +63,13 @@ class Up(nn.Module):
     def forward(self, x1, x2):
         x1 = self.up(x1)
         
-        # Ajuster la taille si nécessaire
         diffY = x2.size()[2] - x1.size()[2]
         diffX = x2.size()[3] - x1.size()[3]
         
         x1 = F.pad(x1, [diffX // 2, diffX - diffX // 2,
                         diffY // 2, diffY - diffY // 2])
         
-        # Concatenate
+        # On fait une concaténation des 2 encodeurs pour obtenir les détails des 2 couches
         x = torch.cat([x2, x1], dim=1)
         return self.conv(x)
 

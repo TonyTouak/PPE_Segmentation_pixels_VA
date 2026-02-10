@@ -9,7 +9,7 @@ Métriques pour l'évaluation de la segmentation sémantique
 import numpy as np
 import torch
 
-
+# On évalue les performences du modèle
 class SegmentationMetrics:
     """Calcul des métriques de segmentation sémantique"""
     
@@ -25,6 +25,8 @@ class SegmentationMetrics:
     
     def reset(self):
         """Réinitialise les compteurs"""
+        # Notre matrice de confusion va nous permettre de valider ou non
+        # nos prédictions sur tous les pixels (Entre traversables et obstrués)
         self.confusion_matrix = np.zeros((self.num_classes, self.num_classes), dtype=np.int64)
     
     def update(self, predictions, targets):
@@ -35,7 +37,8 @@ class SegmentationMetrics:
             predictions: Tensor de prédictions (B, H, W) ou (B, C, H, W)
             targets: Tensor de targets (B, H, W)
         """
-        # Convertir en numpy
+         # On Convertit les tensors PyTorch en numpy
+         # On prend argmax pour avoir les classes (0 ou 1)
         if torch.is_tensor(predictions):
             if predictions.ndim == 4:  # (B, C, H, W)
                 predictions = torch.argmax(predictions, dim=1)
@@ -74,6 +77,9 @@ class SegmentationMetrics:
         Returns:
             iou_per_class: Array des IoU par classe
         """
+
+        # L'IoU va calculer l'intersection entre Prédiction et vérité sur 
+        # l'union des deux
         iou_per_class = np.zeros(self.num_classes)
         
         for i in range(self.num_classes):
@@ -99,6 +105,8 @@ class SegmentationMetrics:
         Returns:
             miou: Mean IoU sur toutes les classes
         """
+
+        # Ici on regarde le IoU sur toutes les classes, la moyenne par classe
         iou_per_class = self.get_iou_per_class()
         
         # Ignorer les NaN (classes non présentes)
@@ -131,6 +139,9 @@ class SegmentationMetrics:
         Returns:
             dice_per_class: Array des coefficients de Dice par classe
         """
+        # Dice = (2 x Intersection) / (Prédiction + Vérité)
+        # On s'en sert pour voir si le modèle est bon pour 
+        # détecter des objets très fins ou très petits
         dice_per_class = np.zeros(self.num_classes)
         
         for i in range(self.num_classes):
@@ -263,6 +274,7 @@ def compute_iou(pred, target, num_classes=2, ignore_index=None):
     Returns:
         iou: IoU moyen
     """
+    # Dans CARLA, certaines classes pourraient être ignorée (ex: Ciel)
     metrics = SegmentationMetrics(num_classes, ignore_index)
     metrics.update(pred, target)
     return metrics.get_miou()

@@ -13,7 +13,7 @@ import sys
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from config import BINARY_COLORS, BINARY_CLASSES
 
-
+# Donne une idée visuelle de la réussite ou non de l'étiquetage
 def visualize_predictions(images, masks, predictions, num_samples=4, save_path=None):
     """
     Visualise les images, masques ground truth et prédictions côte à côte
@@ -25,7 +25,7 @@ def visualize_predictions(images, masks, predictions, num_samples=4, save_path=N
         num_samples: Nombre d'échantillons à visualiser
         save_path: Chemin pour sauvegarder la figure (optionnel)
     """
-    # Dénormaliser les images
+    # On dénormalise les images pour pouvoir bien les rafficher
     mean = torch.tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1)
     std = torch.tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1)
     
@@ -56,7 +56,7 @@ def visualize_predictions(images, masks, predictions, num_samples=4, save_path=N
         axes[i, 0].set_title('Image Originale')
         axes[i, 0].axis('off')
         
-        # Ground truth
+        # Ground truth, On applique les couleurs à notre ségmentation binaire
         gt_colored = colorize_mask(masks[i])
         axes[i, 1].imshow(gt_colored)
         axes[i, 1].set_title('Ground Truth')
@@ -101,7 +101,7 @@ def colorize_mask(mask, class_colors=None):
     
     return colored_mask
 
-
+# On supperpose le masque et l'image d'origine
 def overlay_prediction_on_image(image, prediction, alpha=0.5):
     """
     Superpose la prédiction sur l'image originale
@@ -124,10 +124,10 @@ def overlay_prediction_on_image(image, prediction, alpha=0.5):
     if image.dtype == np.float32 or image.dtype == np.float64:
         image = (image * 255).astype(np.uint8)
     
-    # Coloriser la prédiction
+    # On colorise la prédiction (vert/rouge)
     pred_colored = colorize_mask(prediction)
     
-    # Superposer
+    # On supperpose avec transparence 
     overlayed = cv2.addWeighted(image, 1 - alpha, pred_colored, alpha, 0)
     
     return overlayed
@@ -196,10 +196,10 @@ def create_comparison_video(images, masks, predictions, output_path, fps=10):
         mask_colored = colorize_mask(mask)
         pred_colored = colorize_mask(pred)
         
-        # Convertir BGR pour OpenCV
-        img_bgr = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
-        mask_bgr = cv2.cvtColor(mask_colored, cv2.COLOR_RGB2BGR)
-        pred_bgr = cv2.cvtColor(pred_colored, cv2.COLOR_RGB2BGR)
+        # Convertir BGR pour OpenCV et pour chaque frame :
+        img_bgr = cv2.cvtColor(img, cv2.COLOR_RGB2BGR) # image d'origine
+        mask_bgr = cv2.cvtColor(mask_colored, cv2.COLOR_RGB2BGR) # masque réel
+        pred_bgr = cv2.cvtColor(pred_colored, cv2.COLOR_RGB2BGR) # masque prédit
         
         # Concaténer horizontalement
         frame = np.hstack([img_bgr, mask_bgr, pred_bgr])
@@ -219,7 +219,7 @@ def plot_training_curves(log_file, save_path=None):
         save_path: Chemin pour sauvegarder la figure
     """
     # Cette fonction nécessite un fichier de log structuré
-    # Implémentation à adapter selon le format de vos logs
+    # Implémentation à adapter en fonction du format des logs
     pass
 
 

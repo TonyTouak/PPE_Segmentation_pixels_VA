@@ -25,6 +25,7 @@ Sortie finale : Traversable (vert) / Obstrué (rouge)
 ## 📋 Table des matières
 
 - [Installation](#installation)
+- [Gestion des dimensions](#-gestion-des-dimensions-important)
 - [Collecte de données](#1-collecte-de-données-depuis-carla)
 - [Préparation des données](#2-préparation-des-données)
 - [Entraînement](#3-entraînement)
@@ -33,7 +34,23 @@ Sortie finale : Traversable (vert) / Obstrué (rouge)
 - [Structure du projet](#structure-du-projet)
 - [Adaptation aux conditions extrêmes](#adaptation-aux-conditions-extrêmes)
 
-## 🚀 Installation
+## 📐 Gestion des Dimensions (Important!)
+
+Le projet gère **intelligemment** les dimensions pour éviter les déformations d'image :
+
+- **Collecte CARLA** : 800x600 pixels (par défaut)
+- **Entraînement** : 512x512 avec **préservation de l'aspect ratio** (padding)
+- **Avantage** : Pas de déformation des objets (voitures, piétons gardent leurs proportions)
+
+**Configuration dans `config.py`** :
+```python
+PRESERVE_ASPECT_RATIO = True  # ← RECOMMANDÉ (utilise padding)
+TRAINING_IMAGE_SIZE = (512, 512)  # Résolution du modèle
+```
+
+📖 **Guide complet** : Consultez [DIMENSIONS.md](DIMENSIONS.md) pour comprendre l'impact des résolutions et choisir la meilleure configuration.
+
+## 📊 Workflow Complet
 
 ### Prérequis
 
