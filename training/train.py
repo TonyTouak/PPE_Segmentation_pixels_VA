@@ -223,12 +223,14 @@ def get_dataloader(images_dir, masks_dir, batch_size, image_size=None,
         image_size=image_size
     )
     
+    use_pin_memory = torch.cuda.is_available()
+
     loader = DataLoader(
         dataset,
         batch_size=batch_size,
         shuffle=shuffle,
         num_workers=num_workers,
-        pin_memory=True
+        pin_memory=use_pin_memory  # ✅ Conditionnel
     )
     
     return loader

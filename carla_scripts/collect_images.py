@@ -99,35 +99,61 @@ class DataCollector:
     
     def _process_semantic(self, image):
         """Traite l'image de segmentation sémantique"""
-        # CARLA renvoie les classes encodées en rouge
         array = np.frombuffer(image.raw_data, dtype=np.dtype("uint8"))
         array = np.reshape(array, (image.height, image.width, 4))
-        # Le canal rouge contient la classe
-        semantic_data = array[:, :, 2]  # Canal rouge = classe sémantique
+
+        # ⚠️ IMPORTANT: CARLA retourne les données en BGRA
+        # Le canal qui contient la classe sémantique dépend de la version CARLA:
+        #   CARLA 0.9.x : classe dans le canal Rouge → index 2 en BGRA
+        #   Certaines versions : classe dans le canal Rouge → index 2
+        # Si vos masques semblent incorrects, essayez l'index 0, 1 ou 3
+
+        # Extraction de la classe sémantique depuis le canal Rouge (BGRA → index 2)
+        semantic_data = array[:, :, 2].astype(np.uint8)
+
+        # Vérification automatique des valeurs
+        unique_vals = np.unique(semantic_data)
+        max_val = unique_vals.max()
+
+        if max_val > 22:
+            # Mauvais canal ! Les valeurs dépassent 22 (max des classes CARLA)
+            # Cela arrive si on lit la palette CityScapes au lieu des IDs bruts
+            # On cherche automatiquement le bon canal
+            print(f"⚠️  Canal 2 contient des valeurs > 22 (max={max_val}). Recherche du bon canal...")
+            for ch in range(4):
+                ch_data = array[:, :, ch]
+                if ch_data.max() <= 22 and len(np.unique(ch_data)) > 3:
+                    semantic_data = ch_data.astype(np.uint8)
+                    print(f"   ✓ Canal {ch} utilisé (valeurs 0-{ch_data.max()}, "
+                          f"{len(np.unique(ch_data))} classes)")
+                    break
+
         self.seg_image = semantic_data
     
     def save_current_frame(self):
         """Sauvegarde la frame actuelle si les deux images sont prêtes"""
         if self.rgb_image is not None and self.seg_image is not None:
             filename = f"frame_{self.image_count:06d}"
-            
+
             # Sauvegarder RGB
             rgb_path = os.path.join(self.rgb_dir, f"{filename}.png")
             Image.fromarray(self.rgb_image).save(rgb_path)
-            
-            # Sauvegarder masque sémantique (format numpy pour préserver les valeurs exactes)
+
+            # Sauvegarder masque sémantique en .npy (valeurs exactes 0-22)
             seg_path = os.path.join(self.seg_dir, f"{filename}.npy")
             np.save(seg_path, self.seg_image)
-            
-            # Optionnel: sauvegarder aussi en PNG pour visualisation
+
+            # Sauvegarder aussi en PNG en mode 'L' (niveaux de gris)
+            # ⚠️ CRITIQUE : utiliser mode 'L' pour préserver les valeurs 0-22
+            # sans conversion de couleur ni compression lossy
             seg_path_png = os.path.join(self.seg_dir, f"{filename}.png")
-            Image.fromarray(self.seg_image).save(seg_path_png)
-            
+            Image.fromarray(self.seg_image, mode='L').save(seg_path_png)
+
             self.image_count += 1
-            
+
             if self.image_count % 10 == 0:
                 print(f"Images collectées: {self.image_count}")
-            
+
             return True
         return False
     

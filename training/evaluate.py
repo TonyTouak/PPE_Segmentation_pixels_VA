@@ -20,9 +20,9 @@ from models.unet import get_unet_model
 from data.dataset import SegmentationDataset, get_validation_augmentation
 from utils.metrics import SegmentationMetrics
 from utils.visualization import visualize_predictions, visualize_batch_predictions
-from config import BINARY_CLASSES
+from config import BINARY_CLASSES, TRAINING_IMAGE_SIZE, PRESERVE_ASPECT_RATIO
 
-# 1- Evalue sur la totalité du dataset
+
 def evaluate_model(model, dataloader, device, save_predictions=False, output_dir=None):
     """
     Évalue le modèle sur un dataset
@@ -65,7 +65,9 @@ def evaluate_model(model, dataloader, device, save_predictions=False, output_dir
                 all_predictions.extend(predictions.cpu())
     
     # Afficher le résumé
-    print("\nRÉSULTATS DE L'ÉVALUATION")
+    print("\n" + "="*60)
+    print("RÉSULTATS DE L'ÉVALUATION")
+    print("="*60)
     
     metrics.print_summary(class_names=list(BINARY_CLASSES.values()))
     
@@ -91,7 +93,6 @@ def evaluate_model(model, dataloader, device, save_predictions=False, output_dir
     return metrics.get_summary()
 
 
-# Evalue sur une seule image, pour une analyse rapide
 def evaluate_single_image(model, image_path, mask_path, device, save_path=None):
     """
     Évalue le modèle sur une seule image
@@ -104,23 +105,24 @@ def evaluate_single_image(model, image_path, mask_path, device, save_path=None):
         save_path: Chemin pour sauvegarder la visualisation
     """
     from PIL import Image
-    import torchvision.transforms as T
+    import cv2
+    
+    # Importer la config de dimensions
+    sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    from config import TRAINING_IMAGE_SIZE, PRESERVE_ASPECT_RATIO
     
     model.eval()
     
     # Charger l'image
     image = Image.open(image_path).convert('RGB')
-    original_size = image.size
+    original_size = image.size  # (W, H)
     
-    # Transformation
-    transform = T.Compose([
-        T.Resize((512, 512)),
-        T.ToTensor(),
-        T.Normalize(mean=[0.485, 0.456, 0.406],
-                   std=[0.229, 0.224, 0.225])
-    ])
+    # Utiliser la même augmentation que pour la validation (cohérence train/inférence)
+    transform = get_validation_augmentation(TRAINING_IMAGE_SIZE, PRESERVE_ASPECT_RATIO)
     
-    input_tensor = transform(image).unsqueeze(0).to(device)
+    image_np = np.array(image)
+    transformed = transform(image=image_np, mask=np.zeros(image_np.shape[:2], dtype=np.uint8))
+    input_tensor = transformed['image'].unsqueeze(0).to(device)
     
     # Prédiction
     with torch.no_grad():
@@ -191,7 +193,7 @@ def evaluate_single_image(model, image_path, mask_path, device, save_path=None):
         
         plt.close()
 
-# Permet de choisir le meilleur modèle (ENet vs U-Net)
+
 def compare_models(checkpoint_paths, model_types, dataloader, device):
     """
     Compare plusieurs modèles sur le même dataset
@@ -209,8 +211,8 @@ def compare_models(checkpoint_paths, model_types, dataloader, device):
         print(f"Évaluation: {os.path.basename(checkpoint_path)}")
         print(f"{'='*60}")
         
-        # Charger le modèle
-        checkpoint = torch.load(checkpoint_path, map_location=device)
+        # Charger le modèle (weights_only=False requis pour PyTorch >= 2.6)
+        checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
         
         if model_type == 'enet':
             model = get_enet_model(num_classes=2)
@@ -286,8 +288,8 @@ def main():
     if args.single_image:
         print(f"\nÉvaluation sur une seule image: {args.single_image}")
         
-        # Charger le modèle
-        checkpoint = torch.load(args.checkpoint, map_location=device)
+        # Charger le modèle (weights_only=False requis pour PyTorch >= 2.6)
+        checkpoint = torch.load(args.checkpoint, map_location=device, weights_only=False)
         
         if args.model == 'enet':
             model = get_enet_model(num_classes=2)
@@ -319,7 +321,7 @@ def main():
         dataset = SegmentationDataset(
             images_dir=args.images,
             masks_dir=args.masks,
-            transform=get_validation_augmentation((512, 512)),
+            transform=get_validation_augmentation(TRAINING_IMAGE_SIZE, PRESERVE_ASPECT_RATIO),
             binary_output=True
         )
         
@@ -337,7 +339,8 @@ def main():
     # Mode: évaluation standard
     print(f"\nChargement du modèle depuis {args.checkpoint}...")
     
-    checkpoint = torch.load(args.checkpoint, map_location=device)
+    # weights_only=False requis pour PyTorch >= 2.6 (checkpoints avec numpy)
+    checkpoint = torch.load(args.checkpoint, map_location=device, weights_only=False)
     
     if args.model == 'enet':
         model = get_enet_model(num_classes=2)
@@ -357,7 +360,7 @@ def main():
     dataset = SegmentationDataset(
         images_dir=args.images,
         masks_dir=args.masks,
-        transform=get_validation_augmentation((512, 512)),
+        transform=get_validation_augmentation(TRAINING_IMAGE_SIZE, PRESERVE_ASPECT_RATIO),
         binary_output=True
     )
     

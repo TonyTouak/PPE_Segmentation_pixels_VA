@@ -67,38 +67,57 @@ class SegmentationDataset(Dataset):
         return len(self.image_files)
     
     def __getitem__(self, idx):
-        # On charge l'image
+        # Charger l'image
         img_name = self.image_files[idx]
         img_path = os.path.join(self.images_dir, img_name)
         image = np.array(Image.open(img_path).convert('RGB'))
         
-        # On charge le masque associé (peut être .png ou .npy)
+        # Charger le masque (peut être .png ou .npy)
         mask_name = os.path.splitext(img_name)[0]
         mask_path_png = os.path.join(self.masks_dir, f"{mask_name}.png")
         mask_path_npy = os.path.join(self.masks_dir, f"{mask_name}.npy")
-        
-        if os.path.exists(mask_path_png):
-            mask = np.array(Image.open(mask_path_png))
-        elif os.path.exists(mask_path_npy):
+
+        if os.path.exists(mask_path_npy):
+            # Priorité au .npy : valeurs exactes garanties
             mask = np.load(mask_path_npy)
+        elif os.path.exists(mask_path_png):
+            # PNG: Charger et extraire le canal Rouge (canal 0) DIRECTEMENT
+            # ⚠️ CRITIQUE : Ne PAS utiliser convert('L') qui fait une moyenne pondérée
+            # et détruit les IDs de classes (classe 7 → 0.299*7 ≈ 2)
+            mask_pil = Image.open(mask_path_png)
+            mask = np.array(mask_pil)
+            
+            # Si 3 canaux (RGB), extraire le canal 0 (Rouge)
+            if len(mask.shape) == 3:
+                mask = mask[:, :, 0]
+            # Si déjà en grayscale, utiliser tel quel
         else:
             raise FileNotFoundError(f"Masque introuvable pour {img_name}")
-        
-        # On s'assure que le masque est en 2D
+
+        # Assurer que le masque est 2D
         if len(mask.shape) == 3:
             mask = mask[:, :, 0]
+
+        # ⚠️ ORDRE CRITIQUE :
+        # 1. Transformer EN PREMIER (le padding ajoute 0 = Unlabeled dans l'espace CARLA)
+        # 2. Binariser EN SECOND (Unlabeled=0 → Obstrué=1 = ROUGE)
+        #
+        # ❌ NE PAS faire l'inverse : si on binarise avant, le padding ajoute 0=Traversable=VERT
         
-        # On convertit en binaire
-        if self.binary_output:
-            mask = self._convert_to_binary(mask)
-        
-        # On applique les transformations
+        # Étape 1 : Appliquer les transformations (sur masque multi-classe 0-22)
         if self.transform:
             transformed = self.transform(image=image, mask=mask)
             image = transformed['image']
             mask = transformed['mask']
+            # Reconvertir le mask en numpy si nécessaire pour la binarisation
+            if isinstance(mask, torch.Tensor):
+                mask = mask.numpy()
+
+        # Étape 2 : Conversion vers binaire APRÈS le padding
+        if self.binary_output:
+            mask = self._convert_to_binary(mask)
         
-        # On convertit le masque en tensor long
+        # Convertir le masque en tensor long
         if not isinstance(mask, torch.Tensor):
             mask = torch.from_numpy(mask).long()
         else:
@@ -108,15 +127,23 @@ class SegmentationDataset(Dataset):
     
     def _convert_to_binary(self, mask):
         """
-        Convertit un masque multi-classe CARLA en masque binaire
-        0 = Traversable, 1 = Obstrué
+        Convertit un masque multi-classe CARLA (0-22) en masque binaire (0/1)
+        0 = Traversable (vert), 1 = Obstrué (rouge)
+
+        ⚠️ À appeler APRÈS les transformations géométriques (padding, resize),
+        sinon les pixels de padding (valeur 0) sont traités comme Traversable.
         """
-        binary_mask = np.zeros_like(mask, dtype=np.uint8)
-        
-        # Convertir chaque classe CARLA vers binaire
+        # S'assurer qu'on travaille bien en numpy
+        if isinstance(mask, torch.Tensor):
+            mask = mask.numpy()
+
+        mask = mask.astype(np.int32)  # éviter les débordements sur uint8
+        binary_mask = np.ones(mask.shape, dtype=np.uint8)  # défaut = Obstrué
+
+        # Appliquer le mapping classe par classe
         for carla_class, binary_class in CLASS_TO_BINARY.items():
             binary_mask[mask == carla_class] = binary_class
-        
+
         return binary_mask
     
     def get_sample_visualization(self, idx):
@@ -124,22 +151,31 @@ class SegmentationDataset(Dataset):
         img_name = self.image_files[idx]
         img_path = os.path.join(self.images_dir, img_name)
         image = np.array(Image.open(img_path).convert('RGB'))
-        
+
         mask_name = os.path.splitext(img_name)[0]
-        mask_path_png = os.path.join(self.masks_dir, f"{mask_name}.png")
         mask_path_npy = os.path.join(self.masks_dir, f"{mask_name}.npy")
-        
-        if os.path.exists(mask_path_png):
-            mask = np.array(Image.open(mask_path_png))
-        else:
+        mask_path_png = os.path.join(self.masks_dir, f"{mask_name}.png")
+
+        # Priorité au .npy pour garantir les valeurs exactes
+        if os.path.exists(mask_path_npy):
             mask = np.load(mask_path_npy)
-        
+        elif os.path.exists(mask_path_png):
+            # Extraction directe du canal 0 (pas de convert('L'))
+            mask_pil = Image.open(mask_path_png)
+            mask = np.array(mask_pil)
+            if len(mask.shape) == 3:
+                mask = mask[:, :, 0]
+        else:
+            raise FileNotFoundError(f"Masque introuvable pour {img_name}")
+
         if len(mask.shape) == 3:
             mask = mask[:, :, 0]
-        
+
+        # ⚠️ Même ordre que __getitem__ : binariser APRÈS (pas de transform ici,
+        # donc pas de padding, mais on garde l'ordre logique)
         if self.binary_output:
             mask = self._convert_to_binary(mask)
-        
+
         return image, mask
 
 
@@ -234,12 +270,12 @@ def get_heavy_augmentation(image_size=(512, 512), preserve_aspect_ratio=False):
     
     return A.Compose(transforms + [
         
-        # On oriente l'image pour que notre modèle reconnaise un pbjet quelque soit sa position/orientation
+        # Géométrie
         A.HorizontalFlip(p=0.5),
         A.ShiftScaleRotate(shift_limit=0.15, scale_limit=0.15, 
                           rotate_limit=20, p=0.6),
         
-        # On modifie l'image pour la rendre robuste à des conditions météo extrêmes
+        # Conditions météo extrêmes
         A.OneOf([
             # Brouillard
             A.RandomFog(fog_coef_lower=0.3, fog_coef_upper=0.8, p=1.0),
@@ -250,11 +286,11 @@ def get_heavy_augmentation(image_size=(512, 512), preserve_aspect_ratio=False):
             A.RandomSnow(snow_point_lower=0.1, snow_point_upper=0.3, p=1.0),
         ], p=0.4),
         
-        # On joue aussi avec la luminosité
+        # Luminosité (jour/nuit)
         A.RandomBrightnessContrast(brightness_limit=0.3, 
                                   contrast_limit=0.3, p=0.7),
         
-        # Les Ombres
+        # Ombres
         A.RandomShadow(num_shadows_lower=1, num_shadows_upper=2, p=0.3),
         
         # Bruit
